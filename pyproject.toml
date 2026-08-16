@@ -1,0 +1,39 @@
+[project]
+name = "tubesnip"
+version = "0.1.0"
+description = "TubeSnip — server-side YouTube video slicing/trimming (local & private)"
+readme = "README.md"
+authors = [
+    { name = "Suluh", email = "20874779+sooluh@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.3",
+    "yt-dlp[curl-cffi,default]>=2026.7.4",
+]
+
+[project.scripts]
+tubesnip = "tubesnip:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov=tubesnip --cov-report=term-missing"
+markers = [
+    "e2e: real E2E tests (need network; skipped automatically when offline)",
+]
+
+[tool.coverage.report]
+show_missing = true
+# Backend coverage threshold (target: at least 95%).
+fail_under = 95

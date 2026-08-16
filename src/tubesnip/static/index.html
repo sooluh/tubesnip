@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Cut and trim YouTube videos server-side: paste a link, pick a segment, choose resolution, download the result.">
+  <title>TubeSnip</title>
+
+  <!-- Geist (UI) & JetBrains Mono (data/time) -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <!-- Font Awesome (icons, also used by app.js) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Plyr (YouTube preview player) -->
+  <link rel="stylesheet" href="vendor/plyr/plyr.css">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Top Navbar -->
+  <header class="header">
+    <div class="header-container">
+      <div class="brand-group">
+        <div class="brand-logo" aria-hidden="true">
+          <i class="fa-solid fa-scissors"></i>
+        </div>
+        <div class="brand-text">
+          <h1>TubeSnip</h1>
+          <p>The Fast and Modern Way to Cut and Download YouTube Videos</p>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-container">
+
+    <!-- Section 1: Video URL -->
+    <section class="card url-card" aria-label="Enter video URL">
+      <label for="url-input" class="input-label">YouTube Video URL</label>
+      <div class="url-group">
+        <div class="input-wrapper">
+          <div class="input-icon" aria-hidden="true">
+            <i class="fa-solid fa-link"></i>
+          </div>
+          <input
+            type="url"
+            id="url-input"
+            placeholder="Paste a YouTube link here (https://www.youtube.com/watch?v=…)"
+            class="text-input"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <button id="load-btn" class="btn btn-dark">
+          <i class="fa-solid fa-circle-play" aria-hidden="true"></i>
+          <span>Load Video</span>
+        </button>
+      </div>
+      <p id="error-msg" class="error hidden" role="alert"></p>
+    </section>
+
+    <!-- Section 2: Studio Editor -->
+    <section id="player-section" class="card studio-card hidden" aria-label="Clip editor">
+      <div class="studio-grid">
+
+        <!-- Left column: embed preview + time + timeline -->
+        <div class="studio-col-left">
+          <div class="section-header">
+            <div class="section-title">
+              <i class="fa-solid fa-display" aria-hidden="true"></i>
+              <span>Embedded Stream Preview</span>
+            </div>
+          </div>
+
+          <div id="no-audio-warn" class="no-audio-warn hidden" role="note">
+            <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+            <span>This video has no audio. The cut result will be video-only (no sound).</span>
+          </div>
+
+          <!-- YouTube Embed Frame -->
+          <div class="video-frame">
+            <div id="player"></div>
+          </div>
+
+          <!-- Player meta bar: playhead + Set Start/End -->
+          <div class="player-meta">
+            <div class="playhead-info">
+              <span>Playhead</span>
+              <span id="current-playhead-time" class="time-chip">00:00:00.000</span>
+            </div>
+
+            <div class="quick-set-btns">
+              <button id="btn-set-start" class="btn btn-subtle" disabled>
+                <i class="fa-solid fa-arrow-right-to-bracket" aria-hidden="true"></i>
+                <span>Set Start</span>
+              </button>
+              <button id="btn-set-end" class="btn btn-subtle" disabled>
+                <i class="fa-solid fa-flag-checkered" aria-hidden="true"></i>
+                <span>Set End</span>
+              </button>
+            </div>
+          </div>
+
+          <p id="video-title" class="video-title"></p>
+
+          <!-- Control panel: start/end inputs + timeline -->
+          <div class="controls-panel">
+            <div class="time-inputs-grid">
+              <div class="time-field">
+                <label for="start-input">Start Time (HH:MM:SS.mmm)</label>
+                <input type="text" id="start-input" value="00:00:00.000" class="time-field-input" inputmode="numeric" spellcheck="false" />
+              </div>
+
+              <div class="time-field">
+                <label for="end-input">End Time (HH:MM:SS.mmm)</label>
+                <input type="text" id="end-input" class="time-field-input" spellcheck="false" />
+              </div>
+            </div>
+
+            <!-- Timeline Scrubber -->
+            <div>
+              <div class="scrubber-header">
+                <span>Timeline Scrubber</span>
+                <span id="slider-range-info" class="scrubber-info">00:00:00.000 → 00:00:00.000</span>
+              </div>
+              <div class="slider-wrap">
+                <div class="slider-bar"><div id="slider-fill" class="slider-fill"></div></div>
+                <input type="range" id="start-slider" min="0" max="0" step="1" value="0" class="range-slider-input" aria-label="Clip start">
+                <input type="range" id="end-slider" min="0" max="0" step="1" value="0" class="range-slider-input" aria-label="Clip end">
+              </div>
+              <div class="slider-labels">
+                <span id="slider-start-label">00:00:00.000</span>
+                <span id="slider-end-label">00:00:00.000</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right column: resolution + cut mode + execute -->
+        <div class="studio-col-right">
+          <div class="params-block">
+            <div class="section-header">
+              <div class="section-title">
+                <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+                <span>Cut Parameters</span>
+              </div>
+            </div>
+
+            <!-- Output Resolution -->
+            <div>
+              <label class="input-label">Choose Output Resolution</label>
+              <div class="res-stack" id="res-stack"></div>
+            </div>
+
+            <!-- Cut Mode (shown directly, only after /api/info succeeds) -->
+            <div id="mode-options" class="hidden">
+              <label class="input-label">Cut / Trim Method</label>
+              <div class="trim-grid" id="trim-method-grid">
+                <label class="trim-card active">
+                  <input type="radio" name="mode" value="auto" checked>
+                  <span class="trim-icon auto" aria-hidden="true"><i class="fa-solid fa-wand-magic-sparkles"></i></span>
+                  <span class="trim-title">Auto</span>
+                  <span class="trim-desc">System chooses</span>
+                </label>
+
+                <label class="trim-card">
+                  <input type="radio" name="mode" value="fast">
+                  <span class="trim-icon fast" aria-hidden="true"><i class="fa-solid fa-bolt"></i></span>
+                  <span class="trim-title">Fast</span>
+                  <span class="trim-desc">No re-encode</span>
+                </label>
+
+                <label class="trim-card">
+                  <input type="radio" name="mode" value="accurate">
+                  <span class="trim-icon accurate" aria-hidden="true"><i class="fa-solid fa-bullseye"></i></span>
+                  <span class="trim-title">Precise</span>
+                  <span class="trim-desc">Full re-encode</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Process Button -->
+          <button id="cut-btn" class="btn btn-blue btn-process" disabled>
+            <i class="fa-solid fa-scissors" aria-hidden="true"></i>
+            <span>Start Trimming Video</span>
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Section 3: Processing Status & Download -->
+    <section id="processing-card" class="card hidden" aria-label="Processing status">
+      <div class="process-card-header">
+        <div class="process-status-group">
+          <div id="process-icon" class="process-icon">
+            <i class="fa-solid fa-circle-notch fa-spin" aria-hidden="true"></i>
+          </div>
+          <div>
+            <h3 id="process-title" class="process-title">Processing Video…</h3>
+            <p id="process-subtitle" class="process-subtitle" aria-live="polite">Please wait, the server is preparing your video segment.</p>
+          </div>
+        </div>
+        <span id="process-percent" class="process-percent" aria-live="polite">0%</span>
+      </div>
+
+      <div id="progress-area" class="hidden">
+        <div class="progress-track">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="progress-text"></span>
+          <span id="progress-stage" class="progress-stage"></span>
+        </div>
+      </div>
+
+      <!-- Pipeline Steps -->
+      <div class="pipeline-list">
+        <div class="step-row" id="step-1">
+          <div>
+            <span class="step-badge">1</span>
+            <span>Gathering Info &amp; Extracting Metadata</span>
+          </div>
+          <span class="step-status-text">Waiting…</span>
+        </div>
+
+        <div class="step-row" id="step-2">
+          <div>
+            <span class="step-badge">2</span>
+            <span>Downloading &amp; Cutting Video + Audio</span>
+          </div>
+          <span class="step-status-text">Waiting…</span>
+        </div>
+
+        <div class="step-row" id="step-3">
+          <div>
+            <span class="step-badge">3</span>
+            <span>Precise Re-encode (precise mode only)</span>
+          </div>
+          <span class="step-status-text">Waiting…</span>
+        </div>
+
+        <div class="step-row" id="step-4">
+          <div>
+            <span class="step-badge">4</span>
+            <span>Verifying Result (ffprobe)</span>
+          </div>
+          <span class="step-status-text">Waiting…</span>
+        </div>
+      </div>
+
+      <!-- Result Card -->
+      <div id="download-area" class="result-card hidden">
+        <div class="result-left">
+          <div class="result-icon" aria-hidden="true">
+            <i class="fa-solid fa-circle-check"></i>
+          </div>
+          <div class="result-info">
+            <h4>Result File Ready to Download</h4>
+            <div class="result-meta">
+              <span>Resolution: <strong id="res-result-badge">–</strong></span>
+              <span class="dot-sep" aria-hidden="true">•</span>
+              <span>Duration: <strong id="dur-result-badge">–</strong></span>
+              <span class="dot-sep" aria-hidden="true">•</span>
+              <span>Est. Size: <strong id="size-result-badge">–</strong></span>
+            </div>
+            <p id="download-meta" class="download-meta"></p>
+          </div>
+        </div>
+
+        <a id="download-link" class="btn btn-green" href="#" download>
+          <i class="fa-solid fa-download" aria-hidden="true"></i>
+          <span>Download Trimmed Video</span>
+        </a>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Job picker dialog (reload / multi-tab) -->
+  <div id="job-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="job-dialog-title">
+    <div class="modal-box">
+      <h2 id="job-dialog-title">Cut process found</h2>
+      <p id="job-dialog-text"></p>
+      <div class="modal-actions">
+        <button id="job-follow" class="btn btn-green">Follow this process</button>
+        <button id="job-discard" class="btn btn-ghost">Start new</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="vendor/plyr/plyr.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

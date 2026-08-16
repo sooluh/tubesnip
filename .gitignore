@@ -1,0 +1,21 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+
+# Runtime
+data/
+*.part
+
+# Deno
+.deno_cache/
+cov_profile/
+node_modules/
+
+# OS
+.DS_Store
+
+# Playwright
+.playwright-cli/

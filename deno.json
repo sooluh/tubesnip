@@ -1,0 +1,13 @@
+{
+  "nodeModulesDir": "auto",
+  "imports": {
+    "@std/testing": "jsr:@std/testing@^1.0.0",
+    "@std/expect": "jsr:@std/expect@^1.0.0",
+    "happy-dom": "npm:happy-dom@20.11.2",
+    "oxlint": "npm:oxlint@1.78.0",
+    "@oxlint/plugins": "npm:@oxlint/plugins@1.78.0"
+  },
+  "tasks": {
+    "lint": "deno run --allow-read --allow-env --allow-sys --allow-ffi npm:oxlint"
+  }
+}

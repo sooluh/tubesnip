@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TubeSnip - The Fast and Modern Way to Cut and Download YouTube Videos</title>
+  
+  <!-- Inter & JetBrains Mono Fonts -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <!-- Font Awesome Webfont -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <style>
+    :root {
+      --bg-page: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-input: #f8fafc;
+      --bg-secondary: #f1f5f9;
+      --border-color: #e2e8f0;
+      --border-focus: #3b82f6;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --text-light: #94a3b8;
+      --primary-blue: #2563eb;
+      --primary-blue-hover: #1d4ed8;
+      --primary-blue-light: #eff6ff;
+      --success-green: #10b981;
+      --success-green-hover: #059669;
+      --success-green-light: #f0fdf4;
+      --success-green-border: #bbf7d0;
+      --font-sans: 'Inter', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 16px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-page);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      line-height: 1.5;
+      padding-bottom: 48px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      background-color: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      height: 64px;
+      display: flex;
+      align-items: center;
+    }
+
+    .header-container {
+      max-width: 1200px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: var(--radius-md);
+      background-color: var(--primary-blue);
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .brand-text h1 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-main);
+      line-height: 1.2;
+    }
+
+    .brand-text p {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .main-container {
+      max-width: 1200px;
+      margin: 32px auto 0;
+      padding: 0 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .input-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .url-group {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .input-wrapper {
+      position: relative;
+      flex: 1;
+      min-width: 260px;
+    }
+
+    .input-icon {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-light);
+      display: flex;
+      align-items: center;
+      pointer-events: none;
+    }
+
+    .text-input {
+      width: 100%;
+      padding: 12px 16px 12px 42px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      background-color: var(--bg-input);
+      color: var(--text-main);
+      transition: all 0.2s ease;
+    }
+
+    .text-input:focus {
+      outline: none;
+      background-color: #ffffff;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 20px;
+      border-radius: var(--radius-md);
+      font-size: 14px;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .btn-dark {
+      background-color: #0f172a;
+      color: #ffffff;
+    }
+
+    .btn-dark:hover {
+      background-color: #1e293b;
+    }
+
+    .btn-blue {
+      background-color: var(--primary-blue);
+      color: #ffffff;
+      box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);
+    }
+
+    .btn-blue:hover {
+      background-color: var(--primary-blue-hover);
+    }
+
+    .btn-green {
+      background-color: var(--success-green);
+      color: #ffffff;
+    }
+
+    .btn-green:hover {
+      background-color: var(--success-green-hover);
+    }
+
+    .btn-subtle {
+      background-color: var(--bg-secondary);
+      color: var(--text-main);
+      padding: 6px 12px;
+      font-size: 12px;
+      border-radius: var(--radius-sm);
+    }
+
+    .btn-subtle:hover {
+      background-color: #e2e8f0;
+    }
+
+    .studio-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .studio-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .studio-col-left {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      border-right: 1px solid var(--border-color);
+      padding-right: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .studio-col-left {
+        border-right: none;
+        padding-right: 0;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 24px;
+      }
+    }
+
+    .studio-col-right {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 10px;
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .duration-badge {
+      font-size: 12px;
+      font-family: var(--font-mono);
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .video-frame {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      background-color: #000000;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+    }
+
+    .video-frame video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .player-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      flex-wrap: wrap;
+    }
+
+    .playhead-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-muted);
+    }
+
+    .time-chip {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      color: var(--text-main);
+      background-color: var(--bg-secondary);
+      padding: 3px 8px;
+      border-radius: var(--radius-sm);
+    }
+
+    .quick-set-btns {
+      display: flex;
+      gap: 6px;
+    }
+
+    .controls-panel {
+      background-color: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .time-inputs-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .time-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .time-field label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .time-field-input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background-color: #ffffff;
+      color: var(--text-main);
+    }
+
+    .time-field-input:focus {
+      outline: none;
+      border-color: var(--border-focus);
+    }
+
+    .scrubber-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    .scrubber-info {
+      font-family: var(--font-mono);
+      color: var(--primary-blue);
+      font-weight: 600;
+      font-size: 11px;
+    }
+
+    .range-slider-container {
+      position: relative;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      width: 100%;
+    }
+
+    .range-slider-track {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 6px;
+      background-color: var(--border-color);
+      border-radius: 9999px;
+      z-index: 1;
+    }
+
+    .range-slider-fill {
+      position: absolute;
+      height: 6px;
+      background-color: var(--primary-blue);
+      border-radius: 9999px;
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    .range-slider-input {
+      position: absolute;
+      width: 100%;
+      height: 6px;
+      background: none;
+      pointer-events: none;
+      -webkit-appearance: none;
+      appearance: none;
+      z-index: 3;
+      margin: 0;
+      left: 0;
+    }
+
+    .range-slider-input::-webkit-slider-thumb {
+      height: 20px;
+      width: 20px;
+      border-radius: 50%;
+      background: #ffffff;
+      border: 2px solid var(--primary-blue);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.12);
+      cursor: pointer;
+      pointer-events: auto;
+      -webkit-appearance: none;
+      transition: transform 0.1s ease;
+    }
+
+    .range-slider-input::-webkit-slider-thumb:hover {
+      transform: scale(1.15);
+      border-color: var(--primary-blue-hover);
+    }
+
+    .range-slider-input::-moz-range-thumb {
+      height: 20px;
+      width: 20px;
+      border-radius: 50%;
+      background: #ffffff;
+      border: 2px solid var(--primary-blue);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.12);
+      cursor: pointer;
+      pointer-events: auto;
+      transition: transform 0.1s ease;
+    }
+
+    .res-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .res-btn {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border-color);
+      background-color: #ffffff;
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .res-btn:hover {
+      border-color: #cbd5e1;
+      background-color: var(--bg-input);
+    }
+
+    .res-btn.active {
+      border-color: var(--primary-blue);
+      background-color: var(--primary-blue-light);
+      color: var(--primary-blue-hover);
+      font-weight: 600;
+    }
+
+    .res-btn-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .res-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--text-light);
+      transition: background-color 0.2s ease;
+    }
+
+    .res-btn.active .res-dot {
+      background-color: var(--primary-blue);
+    }
+
+    .res-pixel {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      opacity: 0.75;
+    }
+
+    .trim-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .trim-card {
+      border: 1px solid var(--border-color);
+      background-color: #ffffff;
+      padding: 10px;
+      border-radius: var(--radius-md);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .trim-card:hover {
+      border-color: #cbd5e1;
+      background-color: var(--bg-input);
+    }
+
+    .trim-card.active {
+      border: 2px solid var(--primary-blue);
+      background-color: var(--primary-blue-light);
+    }
+
+    .trim-card input {
+      display: none;
+    }
+
+    .trim-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-main);
+      margin-top: 4px;
+    }
+
+    .trim-desc {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .process-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 16px;
+      margin-bottom: 16px;
+    }
+
+    .process-status-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .process-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius-md);
+      background-color: var(--primary-blue-light);
+      color: var(--primary-blue);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .process-icon.success {
+      background-color: var(--success-green-light);
+      color: var(--success-green);
+    }
+
+    .process-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .process-subtitle {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .process-percent {
+      font-size: 20px;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      color: var(--primary-blue);
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      background-color: var(--bg-secondary);
+      border-radius: 9999px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+      margin-bottom: 8px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #2563eb, #3b82f6);
+      border-radius: 9999px;
+      transition: width 0.3s ease;
+      width: 0%;
+    }
+
+    .progress-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      margin-bottom: 16px;
+    }
+
+    .pipeline-list {
+      background-color: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .step-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-light);
+    }
+
+    .step-row.active {
+      color: var(--primary-blue);
+      font-weight: 600;
+    }
+
+    .step-row.done {
+      color: var(--success-green);
+      font-weight: 500;
+    }
+
+    .step-badge {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background-color: #e2e8f0;
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      margin-right: 8px;
+    }
+
+    .step-row.active .step-badge {
+      background-color: var(--primary-blue);
+      color: #ffffff;
+    }
+
+    .step-row.done .step-badge {
+      background-color: var(--success-green);
+      color: #ffffff;
+    }
+
+    .step-status-text {
+      font-family: var(--font-mono);
+      font-weight: 500;
+    }
+
+    .result-card {
+      background-color: var(--success-green-light);
+      border: 1px solid var(--success-green-border);
+      border-radius: var(--radius-md);
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    .result-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .result-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: var(--radius-md);
+      background-color: var(--success-green);
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .result-info h4 {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .result-meta {
+      display: flex;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      margin-top: 4px;
+    }
+
+    .spin {
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Navbar -->
+  <header class="header">
+    <div class="header-container">
+      <div class="brand-group">
+        <div class="brand-logo">
+          <i class="fa-solid fa-scissors"></i>
+        </div>
+        <div class="brand-text">
+          <h1>TubeSnip</h1>
+          <p>The Fast and Modern Way to Cut and Download YouTube Videos</p>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-container">
+
+    <!-- Section 1: URL Input Card -->
+    <section class="card">
+      <label for="video-url" class="input-label">
+        URL Video Streaming Platform
+      </label>
+      <div class="url-group">
+        <div class="input-wrapper">
+          <div class="input-icon">
+            <i class="fa-solid fa-link"></i>
+          </div>
+          <input 
+            type="url" 
+            id="video-url" 
+            value="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" 
+            placeholder="Masukkan URL video stream (contoh: https://stream.platform.id/watch?v=...)"
+            class="text-input"
+          />
+        </div>
+        <button id="btn-load-url" class="btn btn-dark">
+          <i class="fa-solid fa-circle-play"></i>
+          <span>Muat Video</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Section 2: Studio Editor Card -->
+    <div id="editor-wrapper" class="card hidden">
+      <div class="studio-grid">
+        
+        <!-- Left Column: Video Preview, Playhead Info, Start/End Inputs & Timeline Scrubber -->
+        <div class="studio-col-left">
+          <div class="section-header">
+            <div class="section-title">
+              <i class="fa-solid fa-display" style="color: var(--primary-blue);"></i>
+              <span>Preview Embed Stream</span>
+            </div>
+          </div>
+
+          <!-- Video Embed Frame -->
+          <div class="video-frame">
+            <video id="main-video-player" src="" controlsList="nodownload" playsinline></video>
+          </div>
+
+          <!-- Player Meta Bar -->
+          <div class="player-meta">
+            <div class="playhead-info">
+              <span>Posisi Jam:</span>
+              <span id="current-playhead-time" class="time-chip">00:00:00.000</span>
+            </div>
+            
+            <div class="quick-set-btns">
+              <button id="btn-set-start-now" class="btn btn-subtle">
+                <i class="fa-solid fa-arrow-right-to-bracket"></i>
+                <span>Set Start</span>
+              </button>
+              <button id="btn-set-end-now" class="btn btn-subtle">
+                <i class="fa-solid fa-arrow-left-to-bracket"></i>
+                <span>Set End</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Controls Panel: Start & End Inputs + Dual Range Scrubber -->
+          <div class="controls-panel">
+            <div class="time-inputs-grid">
+              <div class="time-field">
+                <label for="input-start-time">Start Time (HH:MM:SS.mmm)</label>
+                <input type="text" id="input-start-time" value="00:00:00.000" class="time-field-input" />
+              </div>
+
+              <div class="time-field">
+                <label for="input-end-time">End Time (HH:MM:SS.mmm)</label>
+                <input type="text" id="input-end-time" value="00:01:00.000" class="time-field-input" />
+              </div>
+            </div>
+
+            <!-- Timeline Scrubber -->
+            <div>
+              <div class="scrubber-header">
+                <span>Timeline Scrubber</span>
+                <span id="slider-range-info" class="scrubber-info">00:00:00.000 — 00:01:00.000</span>
+              </div>
+              <div class="range-slider-container" id="range-slider-container">
+                <div class="range-slider-track"></div>
+                <div id="slider-fill" class="range-slider-fill"></div>
+                <input type="range" id="range-min" min="0" max="60" value="0" step="0.001" class="range-slider-input">
+                <input type="range" id="range-max" min="0" max="60" value="60" step="0.001" class="range-slider-input">
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Right Column: Resolution Stack + Trim Method + Process Action -->
+        <div class="studio-col-right">
+          <div style="display: flex; flex-direction: column; gap: 20px;">
+            <div class="section-header">
+              <div class="section-title">
+                <i class="fa-solid fa-sliders" style="color: var(--primary-blue);"></i>
+                <span>Parameter Pemotongan</span>
+              </div>
+              <span id="duration-preview-text" class="duration-badge">Durasi Clip: 00:01:00.000</span>
+            </div>
+
+            <!-- Resolution Stack -->
+            <div>
+              <label class="input-label" style="margin-bottom: 10px;">Pilih Resolusi Target Output</label>
+              <div class="res-stack" id="resolution-options-grid"></div>
+            </div>
+
+            <!-- Trim Method Grid -->
+            <div>
+              <label class="input-label" style="margin-bottom: 10px;">Metode Potong / Trim (Advanced)</label>
+              <div class="trim-grid" id="trim-method-grid">
+                
+                <label class="trim-card active">
+                  <input type="radio" name="trim-method" value="auto" checked>
+                  <i class="fa-solid fa-wand-magic-sparkles" style="color: var(--primary-blue); font-size: 16px;"></i>
+                  <span class="trim-title">Otomatis</span>
+                  <span class="trim-desc">Seimbang</span>
+                </label>
+
+                <label class="trim-card">
+                  <input type="radio" name="trim-method" value="fast">
+                  <i class="fa-solid fa-bolt" style="color: #f59e0b; font-size: 16px;"></i>
+                  <span class="trim-title">Fast Cut</span>
+                  <span class="trim-desc">Keyframe</span>
+                </label>
+
+                <label class="trim-card">
+                  <input type="radio" name="trim-method" value="best">
+                  <i class="fa-solid fa-bullseye" style="color: #10b981; font-size: 16px;"></i>
+                  <span class="trim-title">Best</span>
+                  <span class="trim-desc">Presisi ms</span>
+                </label>
+
+              </div>
+            </div>
+          </div>
+
+          <!-- Process Button -->
+          <button id="btn-start-process" class="btn btn-blue" style="width: 100%; padding: 14px;">
+            <i class="fa-solid fa-scissors"></i>
+            <span>Mulai Proses Trim Video</span>
+          </button>
+
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Section 3: Processing & Downloading Status Card -->
+    <section id="processing-section" class="card hidden">
+      <div class="process-card-header">
+        <div class="process-status-group">
+          <div id="process-icon-spinner" class="process-icon">
+            <i class="fa-solid fa-circle-notch fa-spin"></i>
+          </div>
+          <div>
+            <h3 id="process-title" class="process-title">Memproses Video Stream...</h3>
+            <p id="process-subtitle" class="process-subtitle">Harap tunggu, server platform sedang menyiapkan segmen video Anda.</p>
+          </div>
+        </div>
+        <span id="process-percentage" class="process-percent">0%</span>
+      </div>
+
+      <!-- Main Progress Bar -->
+      <div>
+        <div class="progress-track">
+          <div id="main-progress-bar" class="progress-fill"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="process-stage-label">Inisialisasi...</span>
+          <span id="process-speed-info">-- KB/s</span>
+        </div>
+      </div>
+
+      <!-- Pipeline Steps Breakdown -->
+      <div class="pipeline-list">
+        
+        <div class="step-row" id="step-1">
+          <div>
+            <span class="step-badge">1</span>
+            <span>Mengumpulkan Informasi & Extract Metadata</span>
+          </div>
+          <span class="step-status-text">Menunggu...</span>
+        </div>
+
+        <div class="step-row" id="step-2">
+          <div>
+            <span class="step-badge">2</span>
+            <span>Downloading Video Track (DASH Segments)</span>
+          </div>
+          <span class="step-status-text">Menunggu...</span>
+        </div>
+
+        <div class="step-row" id="step-3">
+          <div>
+            <span class="step-badge">3</span>
+            <span>Downloading Audio Track (AAC 192kbps)</span>
+          </div>
+          <span class="step-status-text">Menunggu...</span>
+        </div>
+
+        <div class="step-row" id="step-4">
+          <div>
+            <span class="step-badge">4</span>
+            <span>Merging & Frame-Accurate Cutting (FFmpeg)</span>
+          </div>
+          <span class="step-status-text">Menunggu...</span>
+        </div>
+
+      </div>
+
+      <!-- Result Card -->
+      <div id="result-download-card" class="result-card hidden">
+        <div class="result-left">
+          <div class="result-icon">
+            <i class="fa-solid fa-circle-check"></i>
+          </div>
+          <div class="result-info">
+            <h4>Hasil File Siap Diunduh</h4>
+            <div class="result-meta">
+              <span>Resolusi: <strong id="res-result-badge">1080p</strong></span>
+              <span>•</span>
+              <span>Durasi: <strong id="dur-result-badge">00:01:00.000</strong></span>
+              <span>•</span>
+              <span>Est. Ukuran: <strong id="size-result-badge">32.4 MB</strong></span>
+            </div>
+          </div>
+        </div>
+
+        <a id="btn-download-final" href="#" download="clipped-video-stream.mp4" class="btn btn-green">
+          <i class="fa-solid fa-download"></i>
+          <span>Unduh Video Trimmed</span>
+        </a>
+      </div>
+
+    </section>
+
+  </main>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // Resolution Stack Options
+      const RESOLUTION_OPTIONS = [
+        { label: '144p', res: '256 × 144', bitrate: 0.3 },
+        { label: '240p', res: '426 × 240', bitrate: 0.5 },
+        { label: '360p', res: '640 × 360', bitrate: 0.9 },
+        { label: '480p', res: '854 × 480', bitrate: 1.5 },
+        { label: '720p HD', res: '1280 × 720', bitrate: 3.0 },
+        { label: '1080p FHD', res: '1920 × 1080', bitrate: 5.5, default: true },
+        { label: '1440p 2K', res: '2560 × 1440', bitrate: 10.0 },
+        { label: '2160p 4K', res: '3840 × 2160', bitrate: 22.0 }
+      ];
+
+      // DOM Elements
+      const videoPlayer = document.getElementById('main-video-player');
+      const inputUrl = document.getElementById('video-url');
+      const btnLoadUrl = document.getElementById('btn-load-url');
+      const editorWrapper = document.getElementById('editor-wrapper');
+      const inputStartTime = document.getElementById('input-start-time');
+      const inputEndTime = document.getElementById('input-end-time');
+      const rangeMin = document.getElementById('range-min');
+      const rangeMax = document.getElementById('range-max');
+      const sliderFill = document.getElementById('slider-fill');
+      const sliderRangeInfo = document.getElementById('slider-range-info');
+      const currentPlayheadTime = document.getElementById('current-playhead-time');
+      const durationPreviewText = document.getElementById('duration-preview-text');
+      const btnSetStartNow = document.getElementById('btn-set-start-now');
+      const btnSetEndNow = document.getElementById('btn-set-end-now');
+      const resGrid = document.getElementById('resolution-options-grid');
+      const trimMethodCards = document.querySelectorAll('.trim-card');
+      const btnStartProcess = document.getElementById('btn-start-process');
+      const processingSection = document.getElementById('processing-section');
+      const processIconSpinner = document.getElementById('process-icon-spinner');
+      const processTitle = document.getElementById('process-title');
+      const processSubtitle = document.getElementById('process-subtitle');
+      const mainProgressBar = document.getElementById('main-progress-bar');
+      const processPercentage = document.getElementById('process-percentage');
+      const processStageLabel = document.getElementById('process-stage-label');
+      const processSpeedInfo = document.getElementById('process-speed-info');
+      const resultDownloadCard = document.getElementById('result-download-card');
+      const btnDownloadFinal = document.getElementById('btn-download-final');
+
+      // State Variables
+      let videoDuration = 60;
+      let selectedResolution = RESOLUTION_OPTIONS.find(r => r.default) || RESOLUTION_OPTIONS[5];
+      let activeTrimMethod = 'auto';
+
+      RESOLUTION_OPTIONS.forEach(item => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        const isDefault = item.default;
+        button.className = `res-btn ${isDefault ? 'active' : ''}`;
+        button.innerHTML = `
+          <div class="res-btn-left">
+            <span class="res-dot"></span>
+            <span>${item.label}</span>
+          </div>
+          <span class="res-pixel">${item.res}</span>
+        `;
+
+        button.addEventListener('click', () => {
+          document.querySelectorAll('.res-btn').forEach(b => b.classList.remove('active'));
+          button.classList.add('active');
+          selectedResolution = item;
+        });
+
+        resGrid.appendChild(button);
+      });
+
+      function formatTime(seconds) {
+        if (isNaN(seconds) || seconds < 0) seconds = 0;
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        const ms = Math.floor((seconds % 1) * 1000);
+
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+      }
+
+      function parseTime(timeStr) {
+        if (!timeStr) return null;
+        const match = timeStr.trim().match(/^(?:(?:(\d+):)?(\d+):)?(\d+)(?:\.(\d+))?$/);
+        if (!match) return null;
+
+        const h = parseInt(match[1] || '0', 10);
+        const m = parseInt(match[2] || '0', 10);
+        const s = parseInt(match[3] || '0', 10);
+        const msStr = (match[4] || '0').padEnd(3, '0').slice(0, 3);
+        const ms = parseInt(msStr, 10);
+
+        return (h * 3600) + (m * 60) + s + (ms / 1000);
+      }
+
+      function updateSliderUI() {
+        let minVal = parseFloat(rangeMin.value);
+        let maxVal = parseFloat(rangeMax.value);
+
+        if (minVal >= maxVal) {
+          minVal = Math.max(0, maxVal - 0.1);
+          rangeMin.value = minVal;
+        }
+
+        const sliderMax = parseFloat(rangeMin.max) > 0 ? parseFloat(rangeMin.max) : 60;
+        const minPercent = (minVal / sliderMax) * 100;
+        const maxPercent = (maxVal / sliderMax) * 100;
+
+        // Offset math for 20px slider thumb alignment
+        sliderFill.style.left = `calc(10px + (100% - 20px) * ${minPercent / 100})`;
+        sliderFill.style.width = `calc((100% - 20px) * ${(maxPercent - minPercent) / 100})`;
+
+        inputStartTime.value = formatTime(minVal);
+        inputEndTime.value = formatTime(maxVal);
+
+        const clipDuration = maxVal - minVal;
+        durationPreviewText.textContent = `Durasi Clip: ${formatTime(clipDuration)}`;
+        sliderRangeInfo.textContent = `${formatTime(minVal)} — ${formatTime(maxVal)}`;
+      }
+
+      const bringMinTop = () => { rangeMin.style.zIndex = '5'; rangeMax.style.zIndex = '4'; };
+      const bringMaxTop = () => { rangeMax.style.zIndex = '5'; rangeMin.style.zIndex = '4'; };
+
+      rangeMin.addEventListener('mousedown', bringMinTop);
+      rangeMin.addEventListener('touchstart', bringMinTop);
+      rangeMax.addEventListener('mousedown', bringMaxTop);
+      rangeMax.addEventListener('touchstart', bringMaxTop);
+
+      videoPlayer.addEventListener('loadedmetadata', () => {
+        if (videoPlayer.duration && !isNaN(videoPlayer.duration)) {
+          videoDuration = videoPlayer.duration;
+          rangeMin.max = videoDuration;
+          rangeMax.max = videoDuration;
+          rangeMin.value = 0;
+          rangeMax.value = Math.min(60, videoDuration);
+          updateSliderUI();
+        }
+      });
+
+      videoPlayer.addEventListener('timeupdate', () => {
+        currentPlayheadTime.textContent = formatTime(videoPlayer.currentTime);
+      });
+
+      rangeMin.addEventListener('input', () => {
+        updateSliderUI();
+        videoPlayer.currentTime = parseFloat(rangeMin.value);
+      });
+
+      rangeMax.addEventListener('input', () => {
+        updateSliderUI();
+        videoPlayer.currentTime = parseFloat(rangeMax.value);
+      });
+
+      window.addEventListener('resize', updateSliderUI);
+
+      inputStartTime.addEventListener('change', () => {
+        const parsed = parseTime(inputStartTime.value);
+        if (parsed !== null && parsed >= 0 && parsed < parseFloat(rangeMax.value)) {
+          rangeMin.value = parsed;
+          updateSliderUI();
+          videoPlayer.currentTime = parsed;
+        } else {
+          inputStartTime.value = formatTime(parseFloat(rangeMin.value));
+        }
+      });
+
+      inputEndTime.addEventListener('change', () => {
+        const parsed = parseTime(inputEndTime.value);
+        if (parsed !== null && parsed > parseFloat(rangeMin.value) && parsed <= videoDuration) {
+          rangeMax.value = parsed;
+          updateSliderUI();
+          videoPlayer.currentTime = parsed;
+        } else {
+          inputEndTime.value = formatTime(parseFloat(rangeMax.value));
+        }
+      });
+
+      btnSetStartNow.addEventListener('click', () => {
+        const now = videoPlayer.currentTime;
+        if (now < parseFloat(rangeMax.value)) {
+          rangeMin.value = now;
+          updateSliderUI();
+        }
+      });
+
+      btnSetEndNow.addEventListener('click', () => {
+        const now = videoPlayer.currentTime;
+        if (now > parseFloat(rangeMin.value)) {
+          rangeMax.value = now;
+          updateSliderUI();
+        }
+      });
+
+      btnLoadUrl.addEventListener('click', () => {
+        const url = inputUrl.value.trim();
+        if (url) {
+          videoPlayer.src = url;
+          videoPlayer.load();
+          editorWrapper.classList.remove('hidden');
+          editorWrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setTimeout(updateSliderUI, 50);
+        }
+      });
+
+      trimMethodCards.forEach(card => {
+        card.addEventListener('click', () => {
+          trimMethodCards.forEach(c => c.classList.remove('active'));
+          card.classList.add('active');
+          const radio = card.querySelector('input[type="radio"]');
+          if (radio) {
+            radio.checked = true;
+            activeTrimMethod = radio.value;
+          }
+        });
+      });
+
+      btnStartProcess.addEventListener('click', () => {
+        const startTime = parseFloat(rangeMin.value);
+        const endTime = parseFloat(rangeMax.value);
+        const duration = endTime - startTime;
+
+        if (duration <= 0) return;
+
+        processTitle.textContent = "Memproses Video Stream...";
+        processSubtitle.textContent = "Harap tunggu, server platform sedang menyiapkan segmen video Anda.";
+        processIconSpinner.className = "process-icon";
+        processIconSpinner.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i>`;
+
+        processingSection.classList.remove('hidden');
+        resultDownloadCard.classList.add('hidden');
+        processingSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        const steps = ['step-1', 'step-2', 'step-3', 'step-4'];
+        steps.forEach(id => {
+          const el = document.getElementById(id);
+          el.className = 'step-row';
+          el.querySelector('.step-status-text').textContent = 'Menunggu...';
+        });
+
+        mainProgressBar.style.width = '0%';
+        processPercentage.textContent = '0%';
+
+        let currentProgress = 0;
+
+        function updateStepStatus(stepId, state, statusText) {
+          const el = document.getElementById(stepId);
+          const statusSpan = el.querySelector('.step-status-text');
+
+          el.classList.remove('active', 'done');
+          if (state === 'active') {
+            el.classList.add('active');
+            statusSpan.textContent = statusText || 'Memproses...';
+          } else if (state === 'done') {
+            el.classList.add('done');
+            statusSpan.textContent = 'Selesai ✓';
+          }
+        }
+
+        updateStepStatus('step-1', 'active', 'Mengkstrak manifest DASH...');
+        processStageLabel.textContent = 'Stage 1/4: Mengambil Stream Index';
+        processSpeedInfo.textContent = '12.4 MB/s';
+
+        let interval = setInterval(() => {
+          currentProgress += 2.5;
+          mainProgressBar.style.width = `${currentProgress}%`;
+          processPercentage.textContent = `${Math.min(100, Math.floor(currentProgress))}%`;
+
+          if (currentProgress >= 20 && currentProgress < 22) {
+            updateStepStatus('step-1', 'done');
+            updateStepStatus('step-2', 'active', `Downloading DASH Video (${selectedResolution.label})...`);
+            processStageLabel.textContent = `Stage 2/4: Unduh Segmen Video (${selectedResolution.label})`;
+            processSpeedInfo.textContent = '48.2 MB/s';
+          }
+
+          if (currentProgress >= 60 && currentProgress < 62) {
+            updateStepStatus('step-2', 'done');
+            updateStepStatus('step-3', 'active', 'Downloading Audio Stream...');
+            processStageLabel.textContent = 'Stage 3/4: Unduh Segmen Audio (AAC)';
+            processSpeedInfo.textContent = '8.1 MB/s';
+          }
+
+          if (currentProgress >= 80 && currentProgress < 82) {
+            updateStepStatus('step-3', 'done');
+            updateStepStatus('step-4', 'active', `FFmpeg Muxing (${activeTrimMethod.toUpperCase()})...`);
+            processStageLabel.textContent = 'Stage 4/4: Penggabungan & Pemotongan Presisi';
+            processSpeedInfo.textContent = 'Memproses...';
+          }
+
+          if (currentProgress >= 100) {
+            clearInterval(interval);
+            updateStepStatus('step-4', 'done');
+            processStageLabel.textContent = 'Proses Pemotongan Selesai';
+            processSpeedInfo.textContent = 'Complete';
+
+            processTitle.textContent = "Proses Potong Selesai!";
+            processSubtitle.textContent = "Segmen video Anda telah berhasil diproses dan siap diunduh.";
+            processIconSpinner.className = "process-icon success";
+            processIconSpinner.innerHTML = `<i class="fa-solid fa-circle-check"></i>`;
+
+            const calculatedSizeMB = ((duration * selectedResolution.bitrate) / 8).toFixed(1);
+
+            document.getElementById('res-result-badge').textContent = `${selectedResolution.label} (${selectedResolution.res})`;
+            document.getElementById('dur-result-badge').textContent = formatTime(duration);
+            document.getElementById('size-result-badge').textContent = `${calculatedSizeMB} MB`;
+
+            btnDownloadFinal.href = videoPlayer.src;
+            btnDownloadFinal.download = `stream-clip-${selectedResolution.label.replace(' ', '_')}-${formatTime(duration)}.mp4`;
+
+            resultDownloadCard.classList.remove('hidden');
+          }
+        }, 70);
+      });
+    });
+  </script>
+</body>
+</html>
