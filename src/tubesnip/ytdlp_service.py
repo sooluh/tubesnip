@@ -555,6 +555,10 @@ def convert_format(src: Path, fmt: str, out_dir: Path, progress_cb, duration_s: 
         if vcodec in ("h264", "hevc"):
             cmd = [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                # -progress pipe:1: key=value progress on stdout (so the
+                # frontend's "convert" stage moves instead of jumping straight
+                # to verify and looking skipped).
+                "-nostats", "-progress", "pipe:1",
                 "-i", str(src),
                 "-c", "copy",
                 "-movflags", "+faststart",
@@ -572,6 +576,10 @@ def convert_format(src: Path, fmt: str, out_dir: Path, progress_cb, duration_s: 
                 ]
             cmd = [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                # -progress pipe:1: key=value progress on stdout (so the
+                # frontend's "convert" stage moves instead of jumping straight
+                # to verify and looking skipped).
+                "-nostats", "-progress", "pipe:1",
                 "-i", str(src),
                 "-map", "0:v:0", "-map", "0:a:0?",
                 *vargs,
@@ -584,6 +592,7 @@ def convert_format(src: Path, fmt: str, out_dir: Path, progress_cb, duration_s: 
         if hw and hw[1] in ("av1_vaapi", "vp9_vaapi"):
             cmd = [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                "-nostats", "-progress", "pipe:1",
                 "-vaapi_device", hw[0],
                 "-i", str(src),
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload",
@@ -594,6 +603,10 @@ def convert_format(src: Path, fmt: str, out_dir: Path, progress_cb, duration_s: 
         else:
             cmd = [
                 "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                # -progress pipe:1: key=value progress on stdout (so the
+                # frontend's "convert" stage moves instead of jumping straight
+                # to verify and looking skipped).
+                "-nostats", "-progress", "pipe:1",
                 "-i", str(src),
                 "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "5",
                 "-crf", "32", "-b:v", "0",

@@ -570,6 +570,10 @@ def _process(job_id: str) -> None:
             display = 80 + (pct or 0) * 0.15
             fields["percent"] = display
             fields["message"] = "Re-encoding (precise mode)…"
+        elif stage == "convert":
+            display = 80 + (pct or 0) * 0.15
+            fields["percent"] = display
+            fields["message"] = "Converting format…"
         elif stage == "extract":
             display = 5.0
             fields["percent"] = display
@@ -610,7 +614,7 @@ def _process(job_id: str) -> None:
     fmt = job.get("format") or "mp4"
     if fmt != "mp4":
         update_job(
-            job_id, stage="encode", percent=80,
+            job_id, stage="convert", percent=80,
             message=f"Converting to {fmt.upper()}…",
         )
         logger.info("job %s converting result to %s", job_id, fmt)
@@ -618,7 +622,7 @@ def _process(job_id: str) -> None:
             src=out_file,
             fmt=fmt,
             out_dir=job_dir(job_id),
-            progress_cb=lambda pct: progress("encode", pct),
+            progress_cb=lambda pct: progress("convert", pct),
             duration_s=requested_ms / 1000,
         )
 

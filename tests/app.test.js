@@ -46,6 +46,7 @@ function resetDom() {
   add("error-msg", "hidden");
   byId("url-input").value = "";
   add("player-section", "hidden");
+  add("loading-card", "hidden");
   byId("player").innerHTML = "";
   byId("video-title").textContent = "";
   byId("video-title").title = "";
@@ -75,7 +76,7 @@ function resetDom() {
   byId("process-percent").textContent = "0%";
   byId("process-icon").className = "process-icon";
   byId("progress-stage").textContent = "";
-  for (const id of ["step-1", "step-2", "step-3", "step-4"]) {
+  for (const id of ["step-1", "step-2", "step-3", "step-4", "step-5"]) {
     byId(id).className = "step-row";
     byId(id).querySelector(".step-status-text").textContent = "Waiting…";
   }
@@ -411,6 +412,33 @@ describe("loadVideo", () => {
     await flushAsync();
     expect(fetchLog.length).toBe(1);
     expect(fetchLog[0].url).toBe("/api/info");
+  });
+
+  it("demo link fills the URL and applies the start/end range", async () => {
+    useSyncTimers();
+    const DEMO_INFO = { ...INFO_OK, duration_ms: 8_000_000 }; // longer than the demo end
+    await bootApp([jsonResponse(DEMO_INFO)]);
+    click("demo-link");
+    await flushAsync();
+    expect(byId("url-input").value).toBe("https://www.youtube.com/watch?v=Lcvt7agiBmI");
+    expect(fetchLog[0].url).toBe("/api/info");
+    expect(JSON.parse(fetchLog[0].opts.body).url).toContain("Lcvt7agiBmI");
+    expect(byId("start-input").value).toBe("01:12:45.000");
+    expect(byId("end-input").value).toBe("01:13:37.000");
+    expect(byId("player-section").classList.contains("hidden")).toBe(false);
+    expect(byId("loading-card").classList.contains("hidden")).toBe(true);
+  });
+
+  it("switching URL shows the loading skeleton and hides the stale card", async () => {
+    await bootApp([jsonResponse(INFO_OK)], { hangWhenEmpty: true });
+    await loadVideoViaUi(); // first video loaded
+    expect(byId("player-section").classList.contains("hidden")).toBe(false);
+    // Swap to a different video → /api/info hangs → shimmer replaces the old card.
+    byId("url-input").value = "https://youtu.be/abc123";
+    click("load-btn");
+    await flushAsync();
+    expect(byId("loading-card").classList.contains("hidden")).toBe(false);
+    expect(byId("player-section").classList.contains("hidden")).toBe(true);
   });
 });
 
@@ -1344,11 +1372,13 @@ describe("pipeline steps & result card (new design)", () => {
     expect(byId("step-2").className).toContain("active");
     expect(byId("process-percent").textContent).toBe("40%");
 
-    // Fast: no re-encode → step 3 (precise mode only) is hidden.
+    // Fast: no re-encode → step 3 (precise mode only) is hidden; output is mp4
+    // → step 4 (format conversion) is hidden too.
     es.dispatch({ status: "running", stage: "verify", percent: 97, message: "Verifying…" });
     expect(byId("step-2").className).toContain("done");
     expect(byId("step-3").className).toContain("hidden");
-    expect(byId("step-4").className).toContain("active");
+    expect(byId("step-4").className).toContain("hidden");
+    expect(byId("step-5").className).toContain("active");
     expect(byId("progress-stage").textContent).toBe("verify");
   });
 
@@ -1380,6 +1410,45 @@ describe("pipeline steps & result card (new design)", () => {
     expect(byId("dur-result-badge").textContent).toBe("00:00:04.000");
     // 4s × 2000 kbps × 1000 / 8 = 1.000.000 byte → 1.0 MB
     expect(byId("size-result-badge").textContent).toBe("1.0 MB");
+    expect(byId("download-area").classList.contains("hidden")).toBe(false);
+  });
+
+  it("convert step is visible and active when output is webm", async () => {
+    useFakeEventSource();
+    await bootApp([jsonResponse(INFO_OK), jsonResponse({ job_id: "job123" })]);
+    await loadVideoViaUi();
+    byId("fmt-stack").querySelector('.res-btn[data-format="webm"]').click();
+    click("cut-btn");
+    await flushAsync();
+    const es = lastES();
+    // WebM output → step-4 (format conversion) is shown (not hidden like mp4).
+    expect(byId("step-4").className).not.toContain("hidden");
+    expect(byId("step-3").className).toContain("hidden"); // fast, no re-encode
+    es.dispatch({ status: "running", stage: "download", percent: 50, message: "Downloading…" });
+    es.dispatch({ status: "running", stage: "convert", percent: 85, message: "Converting…" });
+    expect(byId("step-4").className).toContain("active");
+    expect(byId("step-5").className).not.toContain("active");
+  });
+
+  it("cached job arriving done → all visible steps marked done", async () => {
+    useFakeEventSource();
+    await bootApp([jsonResponse(INFO_OK), jsonResponse({ job_id: "job123" })]);
+    await loadVideoViaUi();
+    click("cut-btn");
+    await flushAsync();
+    // No stage events streamed — the reused job is already "done".
+    lastES().dispatch({
+      status: "done",
+      download_url: "/api/download/job123",
+      file: "x.mp4",
+      actual_duration_ms: 4000,
+      snap_delta_ms: 100,
+    });
+    expect(byId("step-1").className).toContain("done");
+    expect(byId("step-2").className).toContain("done");
+    expect(byId("step-5").className).toContain("done");
+    expect(byId("step-3").className).toContain("hidden"); // fast + mp4
+    expect(byId("step-4").className).toContain("hidden");
     expect(byId("download-area").classList.contains("hidden")).toBe(false);
   });
 

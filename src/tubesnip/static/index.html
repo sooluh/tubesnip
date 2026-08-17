@@ -56,7 +56,33 @@
           <span>Load Video</span>
         </button>
       </div>
+      <p class="demo-hint">
+        Quick demo:
+        <a href="#" id="demo-link">cut 01:12:45 → 01:13:37 from Lcvt7agiBmI</a>
+      </p>
       <p id="error-msg" class="error hidden" role="alert"></p>
+    </section>
+
+    <!-- Loading skeleton: shown while /api/info fetches (replaces stale content) -->
+    <section id="loading-card" class="card studio-card hidden" aria-label="Loading video info">
+      <div class="studio-grid">
+        <div class="studio-col-left">
+          <div class="section-header"><div class="shimmer shimmer-h-sm"></div></div>
+          <div class="shimmer shimmer-video"></div>
+          <div class="shimmer shimmer-h-sm"></div>
+          <div class="shimmer shimmer-slider"></div>
+          <div class="shimmer shimmer-slider"></div>
+        </div>
+        <div class="studio-col-right">
+          <div class="params-block">
+            <div class="shimmer shimmer-h-sm"></div>
+            <div class="shimmer shimmer-btn"></div>
+            <div class="shimmer shimmer-btn"></div>
+            <div class="shimmer shimmer-btn"></div>
+            <div class="shimmer shimmer-cta"></div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- Section 2: Studio Editor -->
@@ -263,7 +289,15 @@
         <div class="step-row" id="step-4">
           <div>
             <span class="step-badge">4</span>
-            <span>Verifying Result (ffprobe)</span>
+            <span>Format Conversion (MOV / WebM)</span>
+          </div>
+          <span class="step-status-text">Waiting…</span>
+        </div>
+
+        <div class="step-row" id="step-5">
+          <div>
+            <span class="step-badge">5</span>
+            <span>Verifying Result</span>
           </div>
           <span class="step-status-text">Waiting…</span>
         </div>

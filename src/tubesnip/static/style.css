@@ -289,6 +289,44 @@ body {
   line-height: 1.5;
 }
 
+/* ---------- demo hint (quick demo link under the URL input) ---------- */
+.demo-hint {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+.demo-hint a {
+  color: var(--accent, #2563eb);
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.demo-hint a:hover { opacity: 0.8; }
+
+/* ---------- loading skeleton (shimmer while /api/info fetches) ---------- */
+.shimmer {
+  background: linear-gradient(
+    100deg,
+    var(--shimmer-a, #e5e7eb) 30%,
+    var(--shimmer-b, #f3f4f6) 50%,
+    var(--shimmer-a, #e5e7eb) 70%
+  );
+  background-size: 200% 100%;
+  animation: shimmer-move 1.4s infinite linear;
+  border-radius: 8px;
+}
+@keyframes shimmer-move {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.shimmer-h-sm { width: 45%; height: 16px; }
+.shimmer-video { width: 100%; aspect-ratio: 16 / 9; }
+.shimmer-slider { width: 100%; height: 38px; }
+.shimmer-btn { width: 100%; height: 44px; }
+.shimmer-cta { width: 100%; height: 52px; margin-top: 8px; }
+.studio-col-left .shimmer + .shimmer { margin-top: 4px; }
+.params-block .shimmer + .shimmer { margin-top: 10px; }
+
 /* ---------- studio grid ---------- */
 .studio-grid {
   display: grid;

@@ -7,8 +7,10 @@ const $ = (id) => document.getElementById(id);
 const els = {
   urlInput: $("url-input"),
   loadBtn: $("load-btn"),
+  demoLink: $("demo-link"),
   error: $("error-msg"),
   playerSection: $("player-section"),
+  loadingCard: $("loading-card"),
   player: $("player"),
   title: $("video-title"),
   playheadChip: $("current-playhead-time"),
@@ -103,6 +105,7 @@ function resetToInitial() {
   els.noAudioWarn.classList.add("hidden");
 
   els.playerSection.classList.add("hidden");
+  els.loadingCard.classList.add("hidden");
   els.processingCard.classList.add("hidden");
   hideProgress();
   els.progressStage.textContent = "";
@@ -114,6 +117,7 @@ function resetToInitial() {
   els.resResultBadge.textContent = "–";
   els.durResultBadge.textContent = "–";
   els.sizeResultBadge.textContent = "–";
+  pipelineFmt = "mp4";
   resetPipeline();
 
   els.cutBtn.disabled = true;
@@ -446,11 +450,14 @@ const PIPELINE_STEPS = [
   { id: "step-1", stage: "extract" },
   { id: "step-2", stage: "download" },
   { id: "step-3", stage: "encode" },
-  { id: "step-4", stage: "verify" },
+  { id: "step-4", stage: "convert" },
+  { id: "step-5", stage: "verify" },
 ];
 const ENCODE_STEP = 2; // step-3: re-encode — only happens in precise mode
+const CONVERT_STEP = 3; // step-4: format conversion — only when output != mp4
 const seenStages = new Set();
 let pipelineMode = null; // current job mode: "fast" / "accurate" (null = unknown yet)
+let pipelineFmt = "mp4"; // current job output format (drives convert-step visibility)
 
 function setStepStatus(i, cls, text) {
   const el = $(PIPELINE_STEPS[i].id);
@@ -459,6 +466,10 @@ function setStepStatus(i, cls, text) {
   // Re-encode only exists in precise mode — hide the step in other modes.
   if (i === ENCODE_STEP) {
     el.classList.toggle("hidden", pipelineMode !== "accurate");
+  }
+  // Format conversion only runs when the output is not mp4.
+  if (i === CONVERT_STEP) {
+    el.classList.toggle("hidden", pipelineFmt === "mp4");
   }
 }
 
@@ -490,13 +501,18 @@ function finishPipeline() {
   for (let j = 0; j < PIPELINE_STEPS.length; j++) {
     if (seenStages.has(PIPELINE_STEPS[j].stage)) {
       setStepStatus(j, "done", "Done ✓");
+    } else if (!$(PIPELINE_STEPS[j].id).classList.contains("hidden")) {
+      // A reused (cached) job arrives already "done" — no stage events were
+      // streamed, so mark every applicable (visible) step done too.
+      setStepStatus(j, "done", "Done ✓");
     }
   }
 }
 
 /** Show the processing card (called when a job starts / is followed). */
-function showProcessingCard(mode = null) {
+function showProcessingCard(mode = null, fmt = "mp4") {
   pipelineMode = mode;
+  pipelineFmt = fmt;
   els.processingCard.classList.remove("hidden");
   els.processIcon.className = "process-icon";
   els.processIcon.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i>`;
@@ -636,7 +652,7 @@ async function startCut() {
   }
   hideError();
   const mode = currentMode();
-  showProcessingCard(mode);
+  showProcessingCard(mode, state.selectedFmt);
   hideProgress();
   els.downloadArea.classList.add("hidden");
   els.cutBtn.disabled = true;
@@ -748,6 +764,11 @@ async function loadVideoUrl(url, initial = null) {
   hideError();
   els.loadBtn.disabled = true;
   els.loadBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin" aria-hidden="true"></i><span>Loading…</span>';
+  // Loading state: hide the stale studio card and show a shimmer while the
+  // slow /api/info extract runs (resolutions differ per video, so the old
+  // resolution stack must not linger).
+  els.playerSection.classList.add("hidden");
+  els.loadingCard.classList.remove("hidden");
   try {
     loadEmbed(videoId); // embed immediately → instant feedback
   } catch {
@@ -764,6 +785,8 @@ async function loadVideoUrl(url, initial = null) {
     if (!res.ok) throw new Error(data.detail || "Failed to load video info.");
     applyInfo(data);
     if (initial) applyJobParams(initial);
+    els.loadingCard.classList.add("hidden");
+    els.playerSection.classList.remove("hidden");
     return true;
   } catch (e) {
     resetToInitial();
@@ -872,7 +895,7 @@ async function restoreJob() {
       // so the follow is visible. Reload video info (URL, embed, duration,
       // options) from the job data, then start following.
       els.playerSection.classList.remove("hidden");
-      showProcessingCard(job.mode);
+      showProcessingCard(job.mode, job.format || "mp4");
       if (job.url) {
         els.urlInput.value = job.url;
         loadVideoUrl(job.url, job).then((ok) => {
@@ -894,6 +917,13 @@ async function restoreJob() {
 /* ---------------- events ---------------- */
 
 els.loadBtn.addEventListener("click", loadVideo);
+els.demoLink.addEventListener("click", (e) => {
+  e.preventDefault();
+  const url = "https://www.youtube.com/watch?v=Lcvt7agiBmI";
+  els.urlInput.value = url;
+  // 01:12:45.000 → 01:13:37.000
+  loadVideoUrl(url, { start_ms: 4365000, end_ms: 4417000 });
+});
 els.urlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") loadVideo();
 });
@@ -953,6 +983,7 @@ export function __resetStateForTest() {
   state.selectedRes = "best";
   state.selectedFmt = "mp4";
   seenStages.clear();
+  pipelineFmt = "mp4";
   for (let i = 0; i < PIPELINE_STEPS.length; i++) {
     setStepStatus(i, "", "Waiting…");
   }
