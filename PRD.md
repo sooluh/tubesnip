@@ -269,13 +269,13 @@ tubesnip/
 
 ## 14. Configuration & Deployment
 
-- Env vars: `TUBESNIP_DATA_DIR` (default `./data`), `TUBESNIP_JOB_TTL_H` (default 24), `TUBESNIP_CONCURRENCY` (default 2), `TUBESNIP_COOKIES` / `TUBESNIP_COOKIES_FROM_BROWSER`, `TUBESNIP_LOG_LEVEL`, `TUBESNIP_LOG_FILE`, port.
+- Env vars: `TUBESNIP_DATA_DIR` (default `./data`), `TUBESNIP_JOB_TTL_H` (default 24), `TUBESNIP_CONCURRENCY` (default 2), `TUBESNIP_HOST`/`TUBESNIP_PORT` (default `127.0.0.1`/`8000`; `0.0.0.0` in containers), `TUBESNIP_REDIS_URL` (optional multi-node), `TUBESNIP_SHARED_DIR` (optional shared result storage), `TUBESNIP_COOKIES` / `TUBESNIP_COOKIES_FROM_BROWSER`, `TUBESNIP_LOG_LEVEL`, `TUBESNIP_LOG_FILE`.
 - System dependencies: `python3.12+`, `ffmpeg`, `deno` (yt-dlp-ejs runtime + frontend tests); Python via **uv**: `uv venv` +
   `uv add fastapi uvicorn "yt-dlp[default,curl-cffi]"` (nightly channel).
 - Run: `uv run tubesnip` (or `uv run uvicorn tubesnip.app:app --host 127.0.0.1 --port 8000`) (local access; if remote is needed, put a reverse proxy + simple auth in front — out of scope).
 - `.gitignore` file: `data/`, `*.part`, `.venv/`.
 - **Single process per container.** Do NOT use `uvicorn --workers N` — job state, the worker pool, and SSE subscribers live in-process; multiple uvicorn workers in one process tree would each have their own isolated state (broken job tracking). Scale by running more containers, not more uvicorn workers (see §20).
-- **Docker (planned, M8):** multi-stage image (uv installs deps → runtime stage with `deno` + `ffmpeg`/`ffprobe` + the venv), `data/` on a volume, `SIGTERM` graceful stop. On restart, `jobs.load()` re-queues any interrupted `running` job — nothing is lost.
+- **Docker (M8, done):** multi-stage **Alpine** image (uv-built musl venv; ffmpeg via `apk --no-cache`; deno COPYed from `denoland/deno:alpine` incl. its bundled glibc loader/libs — no apt/curl layers); `data/` on a volume; `/api/health`; `compose.yml` **Swarm** stack (`replicas: 2`, `start-first` rolling updates) with **external Redis**. Cookies in containers use a **bind-mounted `cookies.txt`** (`./data/cookies.txt` → `/app/cookies.txt`, read-only) — refreshing is just overwriting the host file (docker configs are immutable, so they'd force a new config name per refresh). The app copies the source to the writable data dir first because yt-dlp saves cookies back at the end of a run (a read-only mount → `EROFS`). On restart, `jobs.load()` re-queues any interrupted `running` job — nothing is lost.
 
 ---
 
@@ -419,6 +419,15 @@ progress tick) refreshes `tubesnip:lease:{id}` (120s TTL). If a node dies mid-cu
 lease expires and the next sweep re-queues the job — idempotent cutting means it just gets
 re-cut by another node. Rolling deploys work: `SIGTERM` an old container, its abandoned
 jobs are re-claimed automatically.
+
+**Resilience hardening (18 Aug 2026):** a transient Redis error (e.g. a BLPOP socket
+timeout) used to **kill the worker thread permanently** → jobs silently stopped being
+processed. Fixed: the worker loop survives claim errors (log + back off + retry), the
+Redis client uses `retry_on_timeout` + `health_check_interval`, `get_job`/`update_job`
+are best-effort, the SSE listener reconnects on drops, and a supervisor respawns any dead
+worker. Also: in containers, cookies come from a **read-only bind mount** — the app
+copies them to the writable data dir first because yt-dlp saves the cookie jar back at the
+end of a run (read-only mount → `EROFS`).
 
 ### 20.3 What "no lost data/job" means today (already guaranteed single-node)
 

@@ -20,17 +20,14 @@ services:
       TUBESNIP_REDIS_URL: redis://redis:6379/0
       TUBESNIP_HOST: 0.0.0.0
       TUBESNIP_SHARED_DIR: /app/data
-      # Do NOT use TUBESNIP_COOKIES_FROM_BROWSER in a container — there is no
-      # browser/profile inside. Export cookies.txt from your browser and mount
-      # it instead (Netscape format; "Get cookies.txt LOCALLY" extension):
-      # TUBESNIP_COOKIES: /cookies.txt
-      TUBESNIP_COOKIES: /run/secrets/cookies.txt
+      # Cookies in containers: bind-mount cookies.txt (NOT cookies-from-browser —
+      # there is no browser inside). Refresh = overwrite the host file and the app
+      # re-copies it (mtime check). A docker config would be immutable (refreshing
+      # needs a new config name), so a plain bind mount avoids the version dance.
+      TUBESNIP_COOKIES: /app/cookies.txt
     volumes:
       - tubesnip-data:/app/data
-      # - /host/path/cookies.txt:/cookies.txt:ro   # per-node: put it on every swarm node
-    configs:
-      - source: tubesnip_cookies
-        target: /run/secrets/cookies.txt
+      - ./data/cookies.txt:/app/cookies.txt:ro   # put cookies.txt in ./data/ (gitignored)
     deploy:
       replicas: 2
       update_config:                # zero-downtime rolling update
@@ -45,11 +42,6 @@ services:
 networks:
   default:
     name: tubesnip-net
-    external: true
-
-configs:
-  tubesnip_cookies:
-    # Created outside:  docker config create tubesnip_cookies cookies.txt
     external: true
 
 volumes:

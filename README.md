@@ -96,6 +96,10 @@ export TUBESNIP_COOKIES="/path/to/cookies.txt"       # cookies file (Netscape fo
 export TUBESNIP_COOKIES_FROM_BROWSER="chrome"        # or grab them straight from a browser
 ```
 
+Note: `TUBESNIP_COOKIES_FROM_BROWSER` only works on a machine with that browser (your
+local host). In **containers**, bind-mount `cookies.txt` instead — see the
+"Cookies in containers" section under Deployment.
+
 Alternative: create a `yt-dlp.conf` file in the project directory (read automatically
 by yt-dlp):
 
@@ -151,6 +155,30 @@ docker service update --image tubesnip:v2 tubesnip_tubesnip   # zero-downtime ro
 ```
 `compose.yml` has `replicas: 2` + `update_config.order: start-first` — new tasks start
 before old ones stop, so a deploy never drops a client or a job.
+
+**Cookies in containers (bind mount, not browser):** `TUBESNIP_COOKIES_FROM_BROWSER`
+needs a browser profile — there is none inside a container. Export `cookies.txt` from a
+browser logged into Google (Netscape format, "Get cookies.txt LOCALLY" extension) and put
+it in `./data/cookies.txt`; `compose.yml` bind-mounts it read-only:
+```bash
+cp cookies.txt data/cookies.txt
+docker stack deploy -c compose.yml tubesnip
+```
+The app copies the source to the writable `data/cookies-cache.txt` before use (yt-dlp saves
+cookies back at the end of a run — a read-only mount would fail with `EROFS`). **Refresh =
+overwrite the host file and redeploy** — the app re-copies it automatically (mtime check),
+so there's no config versioning dance:
+```bash
+cp cookies-baru.txt data/cookies.txt
+docker stack deploy -c compose.yml tubesnip
+```
+
+**Teardown (stop everything, including external redis):**
+```bash
+docker stack rm tubesnip
+docker service rm redis
+docker network rm tubesnip-net                          # optional, full cleanup
+```
 
 **Restart safety (built in, both modes):**
 - `jobs.json` (single-node) is written **atomically** (temp file + `os.replace`) — a crash mid-write never corrupts it.
