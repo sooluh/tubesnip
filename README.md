@@ -9,6 +9,8 @@ environment managed by [uv](https://docs.astral.sh/uv/). The JS runtime for
 `yt-dlp-ejs` and the frontend tests is **deno**. The frontend is vanilla single-page
 JS (no build step).
 
+![TubeSnip](docs/tubesnip.png)
+
 ## Setup
 
 Prerequisites: `uv`, `deno`, `ffmpeg` (on PATH).
