@@ -121,7 +121,7 @@ with a UI warning.
 | `TUBESNIP_JOB_TTL_H` | `24` | Result files / job records retention (hours) |
 | `TUBESNIP_DATA_DIR` | `data` | Runtime dir: `jobs.json` + per-job temp files |
 | `TUBESNIP_REDIS_URL` | – | **Optional multi-node mode.** When set, the job store, queue, worker lease and SSE fan-out live in Redis (shared across containers). Empty = single-node in-memory + JSON |
-| `TUBESNIP_SHARED_DIR` | – | **Optional shared result storage** (mount NFS/EFS/S3 here across nodes). When set, per-job dirs live under `<shared>/jobs` so any node can serve a download. Required for cross-node downloads |
+| `TUBESNIP_SHARED_DIR` | – | **Optional shared result storage** (mount a POSIX filesystem — NFS, or EFS on AWS — across nodes). When set, per-job dirs live under `<shared>/jobs` so any node can serve a download. Required for cross-node downloads |
 | `TUBESNIP_COOKIES` / `TUBESNIP_COOKIES_FROM_BROWSER` | – | yt-dlp cookies (login — fixes YouTube throttling on servers) |
 | `TUBESNIP_LOG_LEVEL` | `INFO` | `DEBUG` shows ffmpeg/yt-dlp commands + raw progress |
 | `TUBESNIP_LOG_FILE` | `data/logs/app.log` | `off` = console only |
@@ -173,6 +173,32 @@ cp cookies-baru.txt data/cookies.txt
 docker stack deploy -c compose.yml tubesnip
 ```
 
+**Shared storage (NFS) for an Ubuntu Swarm:** cross-node downloads need the result
+files reachable from any node. Pick one swarm node as the NFS server (or a separate box):
+
+```bash
+# NFS server (one node):
+sudo apt install -y nfs-kernel-server
+sudo mkdir -p /srv/tubesnip && sudo chown nobody:nogroup /srv/tubesnip
+echo "/srv/tubesnip <other-node-ip>(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+sudo exportfs -a
+# every other node needs the client only:
+sudo apt install -y nfs-common
+```
+
+Then in `compose.yml`:
+```yaml
+volumes:
+  tubesnip-data:
+    driver_opts:
+      type: nfs
+      o: "addr=<nfs-server-ip>,nfsvers=4,soft"
+      device: ":/srv/tubesnip"
+```
+(`EFS` is the same thing on AWS — a managed NFS endpoint; you just put its DNS in `addr`.)
+S3 is **not** usable here: it's object storage, not a mounted filesystem — TubeSnip reads and
+renames result files, which needs POSIX semantics.
+
 **Teardown (stop everything, including external redis):**
 ```bash
 docker stack rm tubesnip
@@ -185,7 +211,7 @@ docker network rm tubesnip-net                          # optional, full cleanup
 - Single-node: a job that was `running`/`queued` at restart is **re-queued automatically**.
 - Redis mode: every worker holds a **lease** (heartbeat via `update_job`); a job whose lease expires (node crashed) is **re-queued by the shared sweeper** — no job is ever stuck or lost.
 
-**Multi-node (Redis mode):** set `TUBESNIP_REDIS_URL` on every container → jobs/queue/lease/SSE are shared; a load balancer can route anywhere. For **cross-node downloads**, the result files must also be reachable from any node — mount shared storage at `TUBESNIP_SHARED_DIR` (NFS/EFS/S3). Without shared storage, downloads only work from the node that cut the file (use sticky sessions). A container that dies mid-cut has its job re-queued by another node's sweeper; cutting is idempotent, so nothing is lost. Rolling deploys: bring up the new version, drain old nodes, `SIGTERM` — abandoned jobs are re-claimed automatically.
+**Multi-node (Redis mode):** set `TUBESNIP_REDIS_URL` on every container → jobs/queue/lease/SSE are shared; a load balancer can route anywhere. For **cross-node downloads**, the result files must also be reachable from any node — mount shared storage at `TUBESNIP_SHARED_DIR` (**NFS** — or **EFS** on AWS, which is managed NFS; S3 is object storage and can't be mounted here). Without shared storage, downloads only work from the node that cut the file (use sticky sessions). A container that dies mid-cut has its job re-queued by another node's sweeper; cutting is idempotent, so nothing is lost. Rolling deploys: bring up the new version, drain old nodes, `SIGTERM` — abandoned jobs are re-claimed automatically.
 
 ## Notes
 

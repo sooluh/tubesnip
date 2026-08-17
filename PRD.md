@@ -1,6 +1,6 @@
 # PRD — TubeSnip (Server-Side YouTube Video Slicing/Trimming)
 
-**Status:** Draft v2 — implementation M0–M9 partial complete (17 Aug 2026): M0–M8 + Redis-backed M9 done; shared result storage is infra (mount NFS/EFS/S3). Implementation findings in §19; multi-node/zero-downtime roadmap in §20
+**Status:** Draft v2 — implementation M0–M9 partial complete (17 Aug 2026): M0–M8 + Redis-backed M9 done; shared result storage is infra (mount NFS/EFS). Implementation findings in §19; multi-node/zero-downtime roadmap in §20
 **Audience:** Single user (personal), self-hosted — with a scaling ambition to many servers
 **Document purpose:** Research results + implementation plan before writing code.
 
@@ -295,7 +295,7 @@ tubesnip/
 | M6b       | **Set Start / Set End** reading the playhead from the **plyr player** (polling `currentTime` 250 ms → "Playhead Position" chip); **est. file size** in the result card from `bitrate` (yt-dlp `tbr` kbps, sent by `/api/info`) × result duration | Real-time playhead; set start/end buttons change the cut range; accurate size estimate (verified live: 30s @ 1080p → 12.3 MB); backend + frontend ≥ 95% coverage | ✅ |
 | M7        | **Parallel + robust single-node**: worker pool (`TUBESNIP_CONCURRENCY`, default 2), video+audio downloaded in parallel per job, weighted combined progress, video-info cache (1-day TTL), job dedup (identical params → reuse finished/follow running), atomic `jobs.json` writes (temp+rename), restart recovery (running jobs re-queued) | Jobs process concurrently; identical requests don't re-cut; restart never loses/sticks a job; crash never corrupts `jobs.json` | ✅ |
 | M8        | **Dockerize** (multi-stage Alpine image: uv-built musl venv, ffmpeg via `apk --no-cache`, deno COPYed from `denoland/deno:alpine` — no apt/curl layers; `data/` volume; `/api/health`; `compose.yml` Swarm stack with external Redis + `start-first` rolling updates) | `docker compose up` runs TubeSnip; verified live in-container: yt-dlp nightly + deno JS runtime + ffmpeg h264/vp9/opus + `/api/info` end-to-end | ✅ |
-| M9        | **Multi-node / zero-downtime**: shared job store + queue + SSE fan-out in **Redis** (`TUBESNIP_REDIS_URL`, optional), worker **lease + heartbeat + sweeper** (dead node → job re-queued, idempotent re-cut), cross-node dedup, shared result storage hook (`TUBESNIP_SHARED_DIR`) | Two+ containers share jobs/queue/leases/SSE; a crashed node's jobs are re-claimed; rolling deploys don't lose a job. Cross-node downloads need shared storage mounted | 🟨 store/queue/lease/SSE done — shared storage is infra (mount NFS/EFS/S3) |
+| M9        | **Multi-node / zero-downtime**: shared job store + queue + SSE fan-out in **Redis** (`TUBESNIP_REDIS_URL`, optional), worker **lease + heartbeat + sweeper** (dead node → job re-queued, idempotent re-cut), cross-node dedup, shared result storage hook (`TUBESNIP_SHARED_DIR`) | Two+ containers share jobs/queue/leases/SSE; a crashed node's jobs are re-claimed; rolling deploys don't lose a job. Cross-node downloads need shared storage mounted | 🟨 store/queue/lease/SSE done — shared storage is infra (mount NFS/EFS) |
 
 ---
 
@@ -411,7 +411,7 @@ needs infra is the result files.
 | SSE          | in-process pub/sub                                  | Redis pub/sub → per-node listener fan-out ✅   |
 | Dedup        | in-process scan                                     | Redis scan (all nodes see the same jobs) ✅    |
 | TTL cleanup  | worker `_cleanup`                                   | sweeper (single node sweeps via lock) ✅       |
-| Result files | local `data/jobs/<id>/`                             | **needs `TUBESNIP_SHARED_DIR`** (NFS/EFS/S3 mount) — ⏳ infra |
+| Result files | local `data/jobs/<id>/`                             | **needs `TUBESNIP_SHARED_DIR`** (NFS/EFS mount) — ⏳ infra |
 | Cut scratch  | local temp + subprocesses                           | node-local scratch, final file on shared storage ⏳ |
 
 The **lease is the load-bearing piece** for "no lost job": every `update_job` (every
