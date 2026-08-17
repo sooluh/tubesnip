@@ -47,6 +47,15 @@ class CutRequest(BaseModel):
     end_ms: int
     resolution: str = "best"
     mode: str = "fast"
+    format: str = "mp4"
+
+
+@app.get("/api/health")
+def api_health():
+    """Liveness/readiness for container orchestration. `redis` is false in
+    single-node mode or when the configured Redis is unreachable (the app then
+    runs in-memory — healthy, just not multi-node)."""
+    return {"ok": True, "redis": jobs._r() is not None}
 
 
 @app.post("/api/info")
@@ -63,6 +72,8 @@ def api_cut(req: CutRequest):
     """Create a cut job; processed by the worker (one at a time)."""
     if req.mode not in ("fast", "accurate"):
         raise HTTPException(400, "mode must be 'fast' or 'accurate'.")
+    if req.format not in ("mp4", "mov", "webm"):
+        raise HTTPException(400, "format must be 'mp4', 'mov', or 'webm'.")
     if req.start_ms < 0 or req.end_ms <= req.start_ms:
         raise HTTPException(400, "start_ms must be >= 0 and end_ms > start_ms.")
     if not ytdlp_service.extract_video_id(req.url):
@@ -82,6 +93,7 @@ def api_cut(req: CutRequest):
             "end_ms": req.end_ms,
             "resolution": req.resolution,
             "mode": req.mode,
+            "format": req.format,
         }
     )
     return {"job_id": job_id}
@@ -152,7 +164,11 @@ def api_download(job_id: str):
         raise HTTPException(404, "Result file not found.")
 
     suffix = path.suffix.lower()
-    media_type = "video/x-matroska" if suffix == ".mkv" else "video/mp4"
+    media_type = {
+        ".mkv": "video/x-matroska",
+        ".mov": "video/quicktime",
+        ".webm": "video/webm",
+    }.get(suffix, "video/mp4")
     return FileResponse(path, media_type=media_type, filename=_download_name(job))
 
 

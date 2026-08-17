@@ -17,7 +17,18 @@ def test_main_runs_uvicorn(monkeypatch):
     monkeypatch.setattr(uvicorn, "run", fake_run)
     tubesnip.main()
     assert called["app"] == "tubesnip.app:app"
+    assert called["kw"]["host"] == "127.0.0.1"
     assert called["kw"]["port"] == 8000
+
+
+def test_main_respects_host_port_env(monkeypatch):
+    called = {}
+    monkeypatch.setenv("TUBESNIP_HOST", "0.0.0.0")
+    monkeypatch.setenv("TUBESNIP_PORT", "9000")
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: called.update(kw))
+    tubesnip.main()
+    assert called["host"] == "0.0.0.0"
+    assert called["port"] == 9000
 
 
 def test_main_block(monkeypatch):

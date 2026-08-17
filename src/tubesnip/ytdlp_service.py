@@ -6,6 +6,7 @@ installed) — no explicit `--js-runtimes` flags.
 """
 from __future__ import annotations
 
+import functools
 import http.server
 import json
 import logging
@@ -13,6 +14,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -23,16 +25,17 @@ from curl_cffi import requests as crequests
 logger = logging.getLogger("tubesnip.ytdlp")
 
 def _ytdlp_env() -> dict:
-    """PATH that prioritizes the project venv binary.
+    """PATH that prioritizes the current venv's binary.
 
     `yt-dlp` on the system PATH (e.g. Homebrew) may be built with Python
     without curl_cffi → all impersonate targets are "unavailable" → videos are
     rejected ("Impersonate target chrome is not available"). The venv binary
-    (installed via uv/pip) always has curl_cffi, so we prefer it.
+    (installed via uv/pip) always has curl_cffi, so we prefer it. `sys.prefix`
+    is the venv dir regardless of whether the package is editable or copied
+    into site-packages (important inside a Docker image).
     """
     env = dict(os.environ)
-    here = Path(__file__).resolve().parent.parent.parent
-    venv_bin = here / ".venv" / "bin"
+    venv_bin = Path(sys.prefix) / "bin"
     if venv_bin.exists():
         env["PATH"] = f"{venv_bin}{os.pathsep}{env.get('PATH', '')}"
     return env
@@ -48,11 +51,32 @@ def _cookie_args() -> list[str]:
     args: list[str] = []
     cf = os.environ.get("TUBESNIP_COOKIES")
     if cf:
-        args += ["--cookies", cf]
+        args += ["--cookies", _writable_cookies(cf)]
     cb = os.environ.get("TUBESNIP_COOKIES_FROM_BROWSER")
     if cb:
         args += ["--cookies-from-browser", cb]
     return args
+
+
+def _writable_cookies(src: str) -> str:
+    """yt-dlp SAVES the cookie jar back at the end of a run (it captures fresh
+    cookies like PO tokens). A docker swarm config is mounted READ-ONLY at
+    /run/secrets → that save fails with EROFS. Copy the source once into the
+    writable data dir and hand yt-dlp the copy; the mounted config stays the
+    immutable source. On local dev (writable source) it returns the path as-is."""
+    src_path = Path(src)
+    if not src_path.exists():
+        return src
+    data_dir = Path(os.environ.get("TUBESNIP_DATA_DIR", "data"))
+    target = data_dir / "cookies-cache.txt"
+    try:
+        if not target.exists() or src_path.stat().st_mtime > target.stat().st_mtime:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(src_path.read_bytes())
+            target.chmod(0o600)
+    except OSError:
+        return src  # can't copy — fall back to the original path
+    return str(target)
 
 
 # yt-dlp-ejs uses yt-dlp's default JS runtime (deno — already installed on the
@@ -68,6 +92,12 @@ _YT_PATTERNS = [
     r"youtu\.be/([\w-]{6,})",
     r"youtube\.com/(?:watch\?.*v=|embed/|shorts/|live/|v/)([\w-]{6,})",
 ]
+
+# get_video_info runs a full yt-dlp metadata extract (seconds on YouTube) —
+# cache per video_id. Title/duration/resolutions rarely change, and caching
+# avoids repeated bot-check/throttle exposure on reloads.
+_INFO_CACHE_TTL_S = 86400.0  # 1 day
+_info_cache: dict[str, tuple[float, dict]] = {}
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -134,6 +164,17 @@ def _friendly_error(stderr: str) -> str:
             "sign in to confirm",
             "YouTube is blocking automated access (bot-check). Try again, or update yt-dlp: uv run yt-dlp -U",
         ),
+        (
+            "could not find chrome cookies database",
+            "TUBESNIP_COOKIES_FROM_BROWSER points to a browser profile that doesn't exist "
+            "here (no Chrome installed — common in containers). Export cookies.txt from "
+            "your browser and use TUBESNIP_COOKIES instead.",
+        ),
+        (
+            "cookies database",
+            "Browser cookies unavailable (TUBESNIP_COOKIES_FROM_BROWSER). In a "
+            "server/container, export cookies.txt and use TUBESNIP_COOKIES instead.",
+        ),
     ]:
         if frag in low:
             return msg
@@ -179,6 +220,9 @@ def get_video_info(url: str) -> dict:
     vid = extract_video_id(url)
     if not vid:
         raise YtError("Invalid YouTube URL.")
+    cached = _info_cache.get(vid)
+    if cached and time.time() - cached[0] < _INFO_CACHE_TTL_S:
+        return cached[1]
     watch_url = f"https://www.youtube.com/watch?v={vid}"
 
     proc = _run(
@@ -196,7 +240,7 @@ def get_video_info(url: str) -> dict:
         raise YtError("Live streams are not supported.")
 
     formats = data.get("formats", [])
-    return {
+    result = {
         "video_id": data.get("id") or vid,
         "title": data.get("title") or "",
         "duration_ms": int((data.get("duration") or 0) * 1000),
@@ -206,6 +250,8 @@ def get_video_info(url: str) -> dict:
         ),
         "resolutions": _collect_resolutions(formats),
     }
+    _info_cache[vid] = (time.time(), result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +318,7 @@ def _fmt_section(ms: int) -> str:
 # them to googlevideo, so ffmpeg never hits throttling.
 
 _RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
-_PROXY_WINDOW = 1 << 20  # 1 MiB per request
+_PROXY_WINDOW = 4 << 20  # 4 MiB per request — fewer googlevideo round-trips (1 MiB was 4x more)
 _BYTE_POLL_INTERVAL = 0.5  # seconds: sample proxy bytes while decode is idle
 _RETRY_BACKOFF_S = 3.0  # pause between empty-stream retries so throttling subsides
 
@@ -295,6 +341,7 @@ class _RangeProxy:
         self.total_size: int | None = None  # total stream size (from Content-Range)
         self.expected_total: int | None = None  # fallback from the URL's `clen` param
         self.expected_frac: float | None = None  # fraction of the file that will be read
+        self.first_start: int | None = None  # byte offset of ffmpeg's first request
 
     def byte_pct(self) -> float | None:
         """Real stream progress: bytes served / estimated bytes to read.
@@ -308,6 +355,11 @@ class _RangeProxy:
         """
         total = self.total_size or self.expected_total
         frac = self.expected_frac
+        # No `dur` param in the URL → estimate the read fraction from ffmpeg's
+        # first Range (bytes from the seek offset to the end of the file). Keeps
+        # the bar moving during the input-seek decode phase instead of freezing.
+        if frac is None and total and self.first_start is not None:
+            frac = max(0.0, (total - self.first_start) / total)
         if not total or not frac:
             return None
         return min(100.0, self.bytes_served / (total * frac) * 100)
@@ -348,6 +400,8 @@ class _RangeProxy:
                     m = _RANGE_RE.match(rng)
                     if m:
                         start = int(m.group(1))
+                        if counter.first_start is None:
+                            counter.first_start = start
                         end = m.group(2)
                         if end:
                             headers["Range"] = f"bytes={start}-{end}"
@@ -405,13 +459,64 @@ def find_output(out_dir: Path, prefix: str = "out") -> Path | None:
     return cands[0] if cands else None
 
 
+# ---------------------------------------------------------------------------
+# Hardware-accelerated encoding (dynamic GPU detection)
+# ---------------------------------------------------------------------------
+#
+# When the host exposes a GPU through /dev/dri/renderD* (Intel Arc via QSV →
+# VA-API, or AMD via VA-API — e.g. after PCI passthrough into a VM), the
+# encode steps below switch to a VA-API encoder automatically. Detection is
+# gated by an actual 0.5s test encode: a broken driver/encoder falls back to
+# CPU instead of producing corrupt output. CPU is always the fallback, so a
+# machine without /dev/dri (like this one) behaves exactly as before.
+
+_VAAPI_CANDIDATES = ("av1_vaapi", "vp9_vaapi", "h264_vaapi", "hevc_vaapi")
+
+
+@functools.lru_cache(maxsize=4)
+def _vaapi_best(devices: tuple[str, ...] | None = None) -> tuple[str, str] | None:
+    """(device, encoder) for the first VA-API encoder that passes a tiny test
+    encode, else None. `devices` is for tests; default reads /dev/dri/renderD*."""
+    if devices is None:
+        dri = Path("/dev/dri")
+        devices = tuple(str(p) for p in dri.glob("renderD*")) if dri.exists() else ()
+    for device in devices:
+        for enc in _VAAPI_CANDIDATES:
+            try:
+                proc = subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error",
+                     "-vaapi_device", device,
+                     "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.5",
+                     "-vf", "format=nv12,hwupload",
+                     "-c:v", enc, "-f", "null", "-"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+            except Exception:
+                continue
+            if proc.returncode == 0:
+                return (device, enc)
+    return None
+
+
 def _reencode(
     src: Path, start_ms: int, end_ms: int, dst: Path, progress_cb
 ) -> None:
-    """Precise-mode re-encode: frame-accurate cut with libx264 + AAC."""
+    """Precise-mode re-encode: frame-accurate cut with x264 (or HW H.264)."""
     duration = max(1, (end_ms - start_ms) / 1000)
     start = f"{start_ms / 1000:.3f}"
     length = f"{duration:.3f}"
+    # HW via VA-API when a GPU is present; else CPU x264 (untested
+    # encoders are rejected by the test-encode gate in _vaapi_best).
+    vcodec = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+    hw = _vaapi_best()
+    if hw and hw[1] == "h264_vaapi":
+        vcodec = [
+            "-vaapi_device", hw[0],
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload",
+            "-c:v", "h264_vaapi", "-qp", "20",
+        ]
     cmd = [
         "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
         # -progress pipe:1: key=value progress on stdout, still emitted even
@@ -419,7 +524,7 @@ def _reencode(
         "-nostats", "-progress", "pipe:1",
         "-ss", start, "-t", length, "-i", str(src),
         "-map", "0:v:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        *vcodec,
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         str(dst),
@@ -430,6 +535,77 @@ def _reencode(
         )
     except YtError as e:
         raise YtError(f"Precise-mode re-encode failed: {e}") from e
+
+
+def convert_format(src: Path, fmt: str, out_dir: Path, progress_cb, duration_s: float) -> Path:
+    """Post-process a cut result into the requested container; return the new file.
+
+    mp4: no-op (the cut pipeline already produces mp4). mov: container remux
+    (-c copy) when the video codec is MOV-safe (H.264/HEVC), otherwise the
+    video is re-encoded to H.264 first — AV1/VP9 can't live in a MOV container
+    ("av1 only supported in MP4 and AVIF"). webm: re-encode to VP9/Opus
+    (H.264/AAC can't live in a webm container), so it's slower than mov.
+    The source file is removed on success.
+    """
+    if fmt == "mp4":
+        return src
+    dst = out_dir / f"final.{fmt}"
+    if fmt == "mov":
+        vcodec = (probe(str(src)).get("video_codec") or "").lower()
+        if vcodec in ("h264", "hevc"):
+            cmd = [
+                "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                "-i", str(src),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(dst),
+            ]
+        else:
+            # AV1/VP9/unknown → re-encode video to H.264 (audio AAC copies as-is).
+            vargs = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+            hw = _vaapi_best()
+            if hw and hw[1] == "h264_vaapi":
+                vargs = [
+                    "-vaapi_device", hw[0],
+                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload",
+                    "-c:v", "h264_vaapi", "-qp", "20",
+                ]
+            cmd = [
+                "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                "-i", str(src),
+                "-map", "0:v:0", "-map", "0:a:0?",
+                *vargs,
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                str(dst),
+            ]
+    else:  # webm — VP9/AV1 video + Opus audio (H.264/AAC can't go in webm)
+        hw = _vaapi_best()
+        if hw and hw[1] in ("av1_vaapi", "vp9_vaapi"):
+            cmd = [
+                "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                "-vaapi_device", hw[0],
+                "-i", str(src),
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=nv12,hwupload",
+                "-c:v", hw[1], "-b:v", "0", "-qp", "30",
+                "-c:a", "libopus", "-b:a", "128k",
+                str(dst),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
+                "-i", str(src),
+                "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "5",
+                "-crf", "32", "-b:v", "0",
+                "-c:a", "libopus", "-b:a", "128k",
+                str(dst),
+            ]
+    try:
+        _run_ffmpeg_progress(cmd, max(1.0, duration_s), progress_cb)
+    except YtError as e:
+        raise YtError(f"Format conversion to {fmt} failed: {e}") from e
+    src.unlink(missing_ok=True)
+    return dst
 
 
 def cut_section(
@@ -604,40 +780,59 @@ def _proxy_cut_once(
 
     start = start_ms / 1000
     duration = max(1.0, (end_ms - start_ms) / 1000)
+    progress_flags = ["-nostats", "-progress", "pipe:1"]
 
-    parts: list[Path] = []
-    proxies: list[_RangeProxy] = []
+    parts: list[Path] = [None] * len(urls)  # type: ignore[list-item]
+    errors: list[YtError] = []
     progress_cb("download", 0)
-    try:
-        for i, u in enumerate(urls):
-            proxy = _RangeProxy(u)
-            # Fallback total size from the `clen` param when Content-Range has
-            # no total (for byte-based progress).
-            clen = _url_param(u, "clen")
-            if clen and clen.isdigit():
-                proxy.expected_total = int(clen)
+
+    # Parallel progress, weighted by each stream's expected read size. Video is
+    # the big/slow stream; without weighting, the small fast audio part would
+    # pin the bar high while video still crawls ("stuck at 78%").
+    stream_pct: list[float] = [0.0] * len(urls)
+    stream_weight: list[float] = [0.0] * len(urls)
+
+    def _report_progress() -> None:
+        total_w = sum(stream_weight) or 1.0
+        pct = sum(p * w for p, w in zip(stream_pct, stream_weight)) / total_w
+        progress_cb("download", min(100.0, pct))
+
+    def _cut_stream(i: int, u: str) -> Path:
+        proxy = _RangeProxy(u)
+        is_video = i == 0
+        # Fallback total size from the `clen` param when Content-Range has
+        # no total (for byte-based progress).
+        clen = _url_param(u, "clen")
+        dur = float(_url_param(u, "dur") or 0)
+        if clen and clen.isdigit():
+            c = int(clen)
+            proxy.expected_total = c
             # Estimated fraction of the file ffmpeg actually reads (input-seek
             # jumps to the cut position — not from byte 0): clip + GOP margin
             # over the stream duration.
-            dur = float(_url_param(u, "dur") or 0)
             if dur > 0:
                 clip_s = (end_ms - start_ms) / 1000 + 10.0
                 proxy.expected_frac = min(1.0, clip_s / dur)
-            proxy.__enter__()
-            proxies.append(proxy)
-            is_video = i == 0
-            # Extension follows the stream container: AAC can't go into .webm.
-            mime = _url_param(u, "mime") or ""
-            if is_video:
-                ext = "mp4"
-            elif "webm" in mime:
-                ext = "webm"
+                stream_weight[i] = c * proxy.expected_frac
             else:
-                ext = "m4a"
-            out = out_dir / f"sec{i}.{ext}"
-            # -progress pipe:1 on stdout (not stderr `time=`, which loglevel
-            # warning suppresses) so progress actually flows.
-            progress_flags = ["-nostats", "-progress", "pipe:1"]
+                stream_weight[i] = c
+        elif dur > 0:
+            clip_s = (end_ms - start_ms) / 1000 + 10.0
+            proxy.expected_frac = min(1.0, clip_s / dur)
+        if not stream_weight[i]:
+            # No size info → heuristic: video dominates a 10:1 share.
+            stream_weight[i] = 10.0 if is_video else 1.0
+        proxy.__enter__()
+        # Extension follows the stream container: AAC can't go into .webm.
+        mime = _url_param(u, "mime") or ""
+        if is_video:
+            ext = "mp4"
+        elif "webm" in mime:
+            ext = "webm"
+        else:
+            ext = "m4a"
+        out = out_dir / f"sec{i}.{ext}"
+        try:
             if is_video:
                 cmd = [
                     "ffmpeg", "-y", "-nostdin", "-loglevel", "warning",
@@ -654,17 +849,6 @@ def _proxy_cut_once(
                     "-movflags", "+faststart",
                     str(out),
                 ]
-
-                def _video_cb(pct: float) -> None:
-                    # out_time NOT used: -c copy keeps source timestamps, so
-                    # out_time = cut position (100%) from the first packet.
-                    # Proxy bytes are the true realtime signal.
-                    bp = proxy.byte_pct()
-                    if bp is not None:
-                        pct = bp
-                    progress_cb("download", pct * 0.9)
-
-                _run_with_byte_progress(cmd, duration, _video_cb, proxy)
             else:
                 # Audio m4a uses INPUT-seek: indexed moov (sidx) → precise &
                 # fast seek (1-2 requests). Output-seek would read the WHOLE
@@ -678,22 +862,52 @@ def _proxy_cut_once(
                     "-map", "0:a:0", "-c", "copy",
                     str(out),
                 ]
-                def _audio_cb(pct: float) -> None:
-                    bp = proxy.byte_pct()
-                    if bp is not None:
-                        pct = bp
-                    progress_cb("download", 90 + pct * 0.08)
 
-                _run_with_byte_progress(cmd, duration, _audio_cb, proxy)
+            def _stream_cb(pct: float) -> None:
+                # byte_pct is the honest signal (on -c copy, out_time jumps to
+                # the cut position from the first packet); fall back to out_time
+                # only when the stream size is unknown.
+                bp = proxy.byte_pct()
+                if bp is not None:
+                    pct = bp
+                stream_pct[i] = min(100.0, pct)
+                _report_progress()
+
+            _run_with_byte_progress(cmd, duration, _stream_cb, proxy)
+            # Stream work finished (ffmpeg exited 0) → mark it complete.
+            stream_pct[i] = 100.0
+            _report_progress()
             if not out.exists() or out.stat().st_size == 0:
                 raise YtError(
                     f"Stream cut failed ({'video' if is_video else 'audio'}): empty result."
                 )
             _verify_part(out, "video" if is_video else "audio")
-            parts.append(out)
-    finally:
-        for p in proxies:
-            p.__exit__(None, None, None)
+            return out
+        finally:
+            proxy.__exit__(None, None, None)
+
+    # Video + audio download in parallel: overlaps both streams' googlevideo
+    # throttling/transfer time instead of idling one stream while the other
+    # runs — halves the wall-time of the download phase.
+    def _worker(i: int, u: str) -> None:
+        try:
+            parts[i] = _cut_stream(i, u)
+        except YtError as e:
+            errors.append(e)
+        except Exception as e:  # thread crash → propagate as a clear error
+            errors.append(YtError(f"Stream cut failed: {e}"))
+
+    threads = [
+        threading.Thread(target=_worker, args=(i, u), daemon=True)
+        for i, u in enumerate(urls)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
+    parts = [p for p in parts if p is not None]
 
     if len(parts) == 2:
         merged = out_dir / "merged.mp4"
@@ -1000,7 +1214,7 @@ def probe(path: str) -> dict:
     proc = subprocess.run(
         [
             "ffprobe", "-v", "error",
-            "-show_entries", "stream=codec_type,start_time:format=duration",
+            "-show_entries", "stream=codec_type,codec_name,start_time:format=duration",
             "-of", "json", str(path),
         ],
         capture_output=True,
@@ -1023,7 +1237,16 @@ def probe(path: str) -> dict:
         "duration": float(data.get("format", {}).get("duration") or 0),
         "video_start": _first_start_time(video),
         "audio_start": _first_start_time(audio),
+        "video_codec": _first_codec_name(video),
     }
+
+
+def _first_codec_name(streams: list[dict]) -> str | None:
+    for s in streams:
+        c = s.get("codec_name")
+        if c:
+            return str(c)
+    return None
 
 
 def _first_start_time(streams: list[dict]) -> float | None:

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from tubesnip import app as app_module
 from tubesnip import jobs
+from tubesnip import ytdlp_service
 
 
 @pytest.fixture()
@@ -33,6 +34,12 @@ def _reset_jobs_state():
     """
     jobs._jobs = {}
     jobs._queue = queue.Queue()
+    jobs._redis = None
+    jobs._redis_failed = False
+    jobs._subscriptions_started = False
+    jobs.REDIS_URL = ""
+    jobs.SHARED_DIR = None
+    ytdlp_service._info_cache.clear()
     yield
     # Drain leftover jobs so they don't leak into the next test.
     while True:

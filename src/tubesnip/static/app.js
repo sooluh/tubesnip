@@ -23,6 +23,7 @@ const els = {
   fill: $("slider-fill"),
   sliderRangeInfo: $("slider-range-info"),
   resStack: $("res-stack"),
+  fmtStack: $("fmt-stack"),
   modeOptions: $("mode-options"),
   cutBtn: $("cut-btn"),
   processingCard: $("processing-card"),
@@ -47,7 +48,7 @@ const els = {
   jobDiscard: $("job-discard"),
 };
 
-const state = { durationMs: 0, videoId: null, hasAudio: true, selectedRes: "best" };
+const state = { durationMs: 0, videoId: null, hasAudio: true, selectedRes: "best", selectedFmt: "mp4" };
 
 /* ---------------- util ---------------- */
 
@@ -79,6 +80,7 @@ function resetToInitial() {
   state.videoId = null;
   state.hasAudio = true;
   state.selectedRes = "best";
+  state.selectedFmt = "mp4";
 
   els.title.textContent = "";
   els.title.title = "";
@@ -91,6 +93,9 @@ function resetToInitial() {
   els.endLabel.textContent = "00:00:00.000";
   els.sliderRangeInfo.textContent = "00:00:00.000 → 00:00:00.000";
   els.resStack.innerHTML = "";
+  for (const b of els.fmtStack.querySelectorAll(".res-btn")) {
+    b.classList.toggle("active", b.dataset.format === "mp4");
+  }
   els.modeOptions.classList.add("hidden");
   els.playheadChip.textContent = "00:00:00.000";
   els.setStartBtn.disabled = true;
@@ -648,6 +653,7 @@ async function startCut() {
         end_ms: endMs,
         resolution: state.selectedRes,
         mode,
+        format: state.selectedFmt,
       }),
     });
     const data = await res.json();
@@ -798,6 +804,14 @@ function applyJobParams(job) {
       syncTrimCardActive();
     }
   }
+
+  if (job.format && ["mp4", "mov", "webm"].includes(job.format)) {
+    for (const b of els.fmtStack.querySelectorAll(".res-btn")) {
+      const active = b.dataset.format === job.format;
+      b.classList.toggle("active", active);
+      if (active) state.selectedFmt = job.format;
+    }
+  }
 }
 
 /* ---------------- restore job from localStorage (M5) ---------------- */
@@ -892,6 +906,17 @@ els.endSlider.addEventListener("input", () => syncFromSliders("end"));
 els.startInput.addEventListener("change", syncFromStartInput);
 els.endInput.addEventListener("change", syncFromEndInput);
 
+// Output format stack: static buttons (MP4/MOV/WebM) → highlight + state.
+for (const b of els.fmtStack.querySelectorAll(".res-btn")) {
+  b.addEventListener("click", () => {
+    for (const x of els.fmtStack.querySelectorAll(".res-btn")) {
+      x.classList.remove("active");
+    }
+    b.classList.add("active");
+    state.selectedFmt = b.dataset.format;
+  });
+}
+
 // Mode radios: clicking a card checks the radio + syncs the highlight
 // explicitly (no reliance on the change event from label activation, whose
 // behavior differs across browsers/tests).
@@ -926,6 +951,7 @@ export function __resetStateForTest() {
   state.videoId = null;
   state.hasAudio = true;
   state.selectedRes = "best";
+  state.selectedFmt = "mp4";
   seenStages.clear();
   for (let i = 0; i < PIPELINE_STEPS.length; i++) {
     setStepStatus(i, "", "Waiting…");

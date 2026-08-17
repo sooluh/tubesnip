@@ -152,6 +152,25 @@
               <div class="res-stack" id="res-stack"></div>
             </div>
 
+            <!-- Output Format -->
+            <div>
+              <label class="input-label">Output Format</label>
+              <div class="res-stack" id="fmt-stack">
+                <button type="button" class="res-btn active" data-format="mp4">
+                  <span class="res-btn-left"><span class="res-dot"></span><span>MP4</span></span>
+                  <span class="res-pixel">default</span>
+                </button>
+                <button type="button" class="res-btn" data-format="mov">
+                  <span class="res-btn-left"><span class="res-dot"></span><span>MOV</span></span>
+                  <span class="res-pixel">QuickTime</span>
+                </button>
+                <button type="button" class="res-btn" data-format="webm">
+                  <span class="res-btn-left"><span class="res-dot"></span><span>WebM</span></span>
+                  <span class="res-pixel">VP9 · Opus</span>
+                </button>
+              </div>
+            </div>
+
             <!-- Cut Mode (shown directly, only after /api/info succeeds) -->
             <div id="mode-options" class="hidden">
               <label class="input-label">Cut / Trim Method</label>

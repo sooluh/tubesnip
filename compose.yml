@@ -1,0 +1,63 @@
+# TubeSnip — Swarm stack. Deploy:  docker stack deploy -c compose.yml tubesnip
+#
+# Redis is EXTERNAL by design: run it yourself (a `redis:7` container on the
+# same overlay network, an external host, or a managed service like Upstash)
+# and point TUBESNIP_REDIS_URL at it. It is intentionally NOT defined here.
+#
+# The `default` network must exist on the swarm (docker network create -d overlay tubesnip-net)
+# so tubesnip can reach your external redis by service/hostname.
+#
+# Local (non-swarm) run still works:  docker compose up --build
+
+services:
+  tubesnip:
+    image: tubesnip:latest          # build first: docker compose build (or CI push)
+    build: .
+    ports:
+      - target: 8000
+        published: 8000             # swarm ingress mesh → LB across replicas
+    environment:
+      TUBESNIP_REDIS_URL: redis://redis:6379/0
+      TUBESNIP_HOST: 0.0.0.0
+      TUBESNIP_SHARED_DIR: /app/data
+      # Do NOT use TUBESNIP_COOKIES_FROM_BROWSER in a container — there is no
+      # browser/profile inside. Export cookies.txt from your browser and mount
+      # it instead (Netscape format; "Get cookies.txt LOCALLY" extension):
+      # TUBESNIP_COOKIES: /cookies.txt
+      TUBESNIP_COOKIES: /run/secrets/cookies.txt
+    volumes:
+      - tubesnip-data:/app/data
+      # - /host/path/cookies.txt:/cookies.txt:ro   # per-node: put it on every swarm node
+    configs:
+      - source: tubesnip_cookies
+        target: /run/secrets/cookies.txt
+    deploy:
+      replicas: 2
+      update_config:                # zero-downtime rolling update
+        order: start-first          #   new task healthy before old is stopped
+        parallelism: 1
+        delay: 5s
+        failure_action: rollback
+      restart_policy:
+        condition: any
+        delay: 5s
+
+networks:
+  default:
+    name: tubesnip-net
+    external: true
+
+configs:
+  tubesnip_cookies:
+    # Created outside:  docker config create tubesnip_cookies cookies.txt
+    external: true
+
+volumes:
+  tubesnip-data:
+    # Shared result storage so ANY node can serve a download. A single-host
+    # swarm can use a plain local volume; multi-node needs NFS/EFS — uncomment
+    # and fill in your server:
+    # driver_opts:
+    #   type: nfs
+    #   o: "addr=192.168.1.10,nfsvers=4,soft"
+    #   device: ":/srv/tubesnip"

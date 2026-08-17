@@ -39,6 +39,22 @@ DATA_DIR = Path(os.environ.get("TUBESNIP_DATA_DIR", "data"))
 JOBS_DIR = DATA_DIR / "jobs"
 JOBS_FILE = DATA_DIR / "jobs.json"
 TTL_SECONDS = float(os.environ.get("TUBESNIP_JOB_TTL_H", "24")) * 3600
+# Concurrent cut jobs. Kept small on purpose: each job already downloads video
+# + audio in parallel, so N jobs ≈ 2N googlevideo streams. A low cap keeps the
+# box (and the YouTube connection) from being overwhelmed. Set 1 for serial.
+WORKER_COUNT = int(os.environ.get("TUBESNIP_CONCURRENCY", "2"))
+# Optional multi-node mode: when TUBESNIP_REDIS_URL is set, the job store,
+# queue, lease and SSE fan-out live in Redis so many containers share them.
+# Empty → the in-memory + jobs.json single-node mode.
+REDIS_URL = os.environ.get("TUBESNIP_REDIS_URL", "")
+# Optional shared result storage (mount NFS/EFS/S3 here across all nodes). When
+# set, per-job dirs live under <SHARED_DIR>/jobs so any node can serve a cut.
+SHARED_DIR: Path | None = Path(os.environ["TUBESNIP_SHARED_DIR"]) if os.environ.get("TUBESNIP_SHARED_DIR") else None
+_REDIS_LEASE_S = 120  # worker lease: a job whose lease expires is re-queued
+_REDIS_SWEEP_S = 30.0  # dead-worker / TTL sweeper interval
+_REDIS_SWEEP_LOCK_S = 25
+
+import redis as _redis_lib  # type: ignore[no-redef]
 
 _lock = threading.Lock()
 _queue: "queue.Queue[str]" = queue.Queue()
@@ -48,6 +64,85 @@ _worker_started = False
 # SSE subscribers: job_id → list[queue.Queue]. update_job pushes the latest
 # snapshot to all subscribers so /events can stream without polling.
 _subscribers: dict[str, list[queue.Queue]] = {}
+
+# Redis client state: None = not connected yet, otherwise active. A failed
+# first connection marks `_redis_failed` and the app runs single-node (memory).
+_redis: "_redis_lib.Redis | None" = None
+_redis_failed = False
+_subscriptions_started = False
+
+
+def _r() -> "_redis_lib.Redis | None":
+    """Active Redis client when TUBESNIP_REDIS_URL is configured, else None.
+
+    Connects lazily on first use; a failed connection falls back to single-node
+    memory mode with a loud log (no retry loop — restart after fixing Redis).
+    """
+    global _redis, _redis_failed
+    if not REDIS_URL or _redis_failed:
+        return None
+    if _redis is None:
+        try:
+            c = _redis_lib.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=5,
+                socket_timeout=None,      # BLPOP(5s) needs blocking reads
+                retry_on_timeout=True,
+                health_check_interval=30,
+            )
+            c.ping()
+            _redis = c
+            _start_redis_listener()
+        except Exception:
+            logger.exception("Redis unavailable — running single-node (jobs are NOT shared)")
+            _redis_failed = True
+    return _redis
+
+
+def _start_redis_listener() -> None:
+    """One per node: forwards tubesnip:events:* pubsub to local SSE subscribers,
+    so an update made by a worker on another node still reaches this node's
+    EventSource streams."""
+    global _subscriptions_started
+    if _subscriptions_started:
+        return
+    _subscriptions_started = True
+    threading.Thread(target=_redis_event_loop, name="redis-events", daemon=True).start()
+
+
+def _redis_event_loop() -> None:
+    """Forward tubesnip:events:* pubsub to local SSE subscribers. If the Redis
+    connection drops, reconnect instead of dying (a dead listener would freeze
+    progress on this node's EventSource streams)."""
+    while True:
+        try:
+            r = _r()
+            if r is None:
+                time.sleep(2)
+                continue
+            ps = r.pubsub()
+            ps.psubscribe("tubesnip:events:*")
+            for msg in ps.listen():
+                if msg.get("type") != "pmessage":
+                    continue
+                try:
+                    job = json.loads(msg["data"])
+                except Exception:
+                    continue
+                jid = job.get("id")
+                if not jid:
+                    continue
+                with _lock:
+                    subs = list(_subscribers.get(jid, ()))
+                for q in subs:
+                    try:
+                        q.put_nowait(job)
+                    except queue.Full:
+                        pass
+        except Exception:
+            logger.exception("redis events listener dropped — reconnecting")
+            time.sleep(2)
 
 
 def subscribe(job_id: str) -> queue.Queue:
@@ -71,24 +166,75 @@ def unsubscribe(job_id: str, q: queue.Queue) -> None:
 
 def ensure_dirs() -> None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    if SHARED_DIR:
+        (SHARED_DIR / "jobs").mkdir(parents=True, exist_ok=True)
 
 
 def load() -> None:
+    """Load persisted jobs and recover after a restart (single-node mode).
+
+    Jobs that were mid-flight (`running`) are re-queued so they get re-cut
+    instead of being lost or stuck forever — cutting is idempotent (same params
+    → same result). `queued` jobs are simply put back on the queue. Redis mode
+    is a no-op: the store is shared and the sweeper does the recovery.
+    """
     global _jobs
+    if REDIS_URL:
+        return
     try:
         if JOBS_FILE.exists():
             _jobs = json.loads(JOBS_FILE.read_text())
     except Exception:
         _jobs = {}
+    with _lock:
+        requeued = 0
+        for jid, job in _jobs.items():
+            if not isinstance(job, dict):
+                continue
+            status = job.get("status")
+            if status in ("queued", "running"):
+                job["status"] = "queued"
+                job["stage"] = "queued"
+                job["percent"] = 0
+                job["error"] = None
+                job["message"] = "Re-queued after restart"
+                job["download_url"] = None
+                job["file"] = None
+                _queue.put(jid)
+                requeued += 1
+        if requeued:
+            _save()
+    if requeued:
+        logger.info("recovery: re-queued %d interrupted job(s) after restart", requeued)
 
 
 def _save() -> None:
-    JOBS_FILE.write_text(json.dumps(_jobs, ensure_ascii=False, indent=1))
+    """Persist jobs atomically: write to a temp file, then rename over the
+    target. A crash mid-write leaves the previous valid file in place (no torn
+    JSON), and the rename is atomic on POSIX. Callers hold `_lock`."""
+    tmp = JOBS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(_jobs, ensure_ascii=False, indent=1))
+    os.replace(tmp, JOBS_FILE)
 
 
-def create_job(payload: dict) -> str:
-    job_id = uuid.uuid4().hex[:10]
-    job = {
+# A cut request's identity (exact-param match for job reuse). Normalized so a
+# request without an explicit format matches an older job that predates it.
+_JOB_PARAM_KEYS = ("url", "start_ms", "end_ms", "resolution", "mode", "format")
+
+
+def _params_key(payload: dict) -> tuple:
+    return (
+        payload.get("url"),
+        payload.get("start_ms"),
+        payload.get("end_ms"),
+        str(payload.get("resolution") or "best"),
+        payload.get("mode") or "fast",
+        payload.get("format") or "mp4",
+    )
+
+
+def _new_job(job_id: str, payload: dict) -> dict:
+    return {
         "id": job_id,
         "status": "queued",
         "stage": "queued",
@@ -103,7 +249,65 @@ def create_job(payload: dict) -> str:
         "created_at": time.time(),
         **payload,
     }
+
+
+def _redis_find_existing(r, key: tuple) -> str | None:
+    """Dedup scan over the shared store (all nodes see the same jobs)."""
+    for jid, raw in r.hgetall("tubesnip:jobs").items():
+        try:
+            job = json.loads(raw)
+        except Exception:
+            continue
+        if _params_key(job) != key:
+            continue
+        status = job.get("status")
+        if status in ("queued", "running"):
+            return jid
+        if status == "done" and job.get("file"):
+            result_file = job_dir(jid) / job["file"]
+            if result_file.exists():
+                return jid
+    return None
+
+
+def create_job(payload: dict) -> str:
+    key = _params_key(payload)
+    r = _r()
+    if r is not None:
+        job_id = _redis_find_existing(r, key)
+        if job_id:
+            logger.info("job %s reused (identical job, shared store)", job_id)
+            return job_id
+        job_id = uuid.uuid4().hex[:10]
+        job = _new_job(job_id, payload)
+        r.hset("tubesnip:jobs", job_id, json.dumps(job))
+        r.sadd("tubesnip:ids", job_id)
+        r.rpush("tubesnip:queue", job_id)
+        logger.info(
+            "job %s created (redis): url=%s start=%s end=%s resolution=%s mode=%s",
+            job_id, payload.get("url"), _fmt_ms(payload.get("start_ms")),
+            _fmt_ms(payload.get("end_ms")), payload.get("resolution", "best"),
+            payload.get("mode", "fast"),
+        )
+        return job_id
     with _lock:
+        # Reuse an existing job with identical params instead of re-cutting:
+        # a queued/running job is followed; a finished one is served directly
+        # as long as its result file still exists.
+        for jid, job in _jobs.items():
+            if _params_key(job) != key:
+                continue
+            status = job.get("status")
+            if status in ("queued", "running"):
+                logger.info("job %s reused (identical %s job)", jid, status)
+                return jid
+            if status == "done" and job.get("file"):
+                result_file = job_dir(jid) / job["file"]
+                if result_file.exists():
+                    logger.info("job %s reused (identical completed job)", jid)
+                    return jid
+        job_id = uuid.uuid4().hex[:10]
+        job = _new_job(job_id, payload)
         _jobs[job_id] = job
         _save()
     _queue.put(job_id)
@@ -117,16 +321,55 @@ def create_job(payload: dict) -> str:
 
 
 def get_job(job_id: str) -> dict | None:
+    r = _r()
+    if r is not None:
+        try:
+            raw = r.hget("tubesnip:jobs", job_id)
+        except Exception:
+            logger.exception("redis get failed — treating job as missing")
+            return None
+        return json.loads(raw) if raw else None
     with _lock:
         job = _jobs.get(job_id)
         return dict(job) if job else None
 
 
-def update_job(job_id: str, **fields) -> None:
+def update_job(job_id: str, **fields) -> float | None:
+    r = _r()
+    if r is not None:
+        try:
+            raw = r.hget("tubesnip:jobs", job_id)
+            if raw is None:
+                return None
+            job = json.loads(raw)
+            new_pct = fields.get("percent")
+            cur_pct = job.get("percent")
+            if isinstance(new_pct, (int, float)) and isinstance(cur_pct, (int, float)):
+                fields["percent"] = max(new_pct, cur_pct)
+            job.update(fields)
+            r.hset("tubesnip:jobs", job_id, json.dumps(job))
+            # Heartbeat: keep the lease alive so the sweeper doesn't re-queue us.
+            r.set(f"tubesnip:lease:{job_id}", "1", ex=_REDIS_LEASE_S)
+            # Cross-node SSE: workers publish; every node's listener fans out.
+            r.publish(f"tubesnip:events:{job_id}", json.dumps(job, ensure_ascii=False))
+        except Exception:
+            # Best-effort: a transient Redis error must not kill the cut or the
+            # worker thread. Log and carry on — the final state is re-persisted
+            # on the next call.
+            logger.exception("redis update failed (best-effort, continuing)")
+        return fields.get("percent")
     with _lock:
         job = _jobs.get(job_id)
         if not job:
-            return
+            return None
+        # Monotonic percent: the video & audio streams download in parallel
+        # and report out of order from multiple threads, so the bar must never
+        # regress. Clamped here (under the lock) — a per-callback guard in the
+        # worker would race between threads and still push lower values.
+        new_pct = fields.get("percent")
+        cur_pct = job.get("percent")
+        if isinstance(new_pct, (int, float)) and isinstance(cur_pct, (int, float)):
+            fields["percent"] = max(new_pct, cur_pct)
         job.update(fields)
         _save()
         snapshot = dict(job)
@@ -137,14 +380,20 @@ def update_job(job_id: str, **fields) -> None:
             q.put_nowait(snapshot)
         except queue.Full:
             pass
+    return fields.get("percent")
 
 
 def job_dir(job_id: str) -> Path:
-    return JOBS_DIR / job_id
+    base = SHARED_DIR / "jobs" if SHARED_DIR else JOBS_DIR
+    return base / job_id
 
 
 def _cleanup() -> None:
-    """Remove jobs & temp dirs past their TTL."""
+    """Remove jobs & temp dirs past their TTL (single-node mode).
+
+    Redis mode: TTL + dead-worker recovery run in the shared sweeper."""
+    if _r() is not None:
+        return
     now = time.time()
     with _lock:
         expired = [
@@ -163,12 +412,70 @@ def start_worker() -> None:
     if _worker_started:
         return
     _worker_started = True
-    threading.Thread(target=_worker_loop, name="cut-worker", daemon=True).start()
+    # Bounded pool (WORKER_COUNT, default 2): jobs run in parallel, but the
+    # cap keeps CPU/bandwidth/YouTube-connections light. All workers drain the
+    # same thread-safe queue. Redis mode also runs one shared-store sweeper
+    # and a supervisor that respawns a worker if it ever dies.
+    if _r() is not None:
+        threading.Thread(target=_sweep_loop, name="cut-sweeper", daemon=True).start()
+        threading.Thread(target=_supervisor_loop, name="cut-supervisor", daemon=True).start()
+    for _ in range(max(1, WORKER_COUNT)):
+        threading.Thread(target=_worker_loop, name="cut-worker", daemon=True).start()
+
+
+def _supervise_once() -> None:
+    """Respawn any cut-worker threads that died despite the guards (safety net
+    — Redis-mode only; memory workers block on the queue and never die)."""
+    alive = sum(1 for t in threading.enumerate() if t.name == "cut-worker")
+    for _ in range(max(1, WORKER_COUNT) - alive):
+        logger.warning("respawned a dead cut-worker thread")
+        threading.Thread(target=_worker_loop, name="cut-worker", daemon=True).start()
+
+
+def _supervisor_loop() -> None:
+    while True:
+        time.sleep(10)
+        try:
+            _supervise_once()
+        except Exception:
+            logger.exception("worker supervisor failed")
+
+
+def _claim() -> str | None:
+    """Block for the next job. Redis: shared list + a worker lease (the lease
+    is the heartbeat that proves the worker is alive; the sweeper re-queues
+    jobs whose lease expired — a dead node never leaves a job stuck)."""
+    r = _r()
+    if r is not None:
+        item = r.blpop("tubesnip:queue", timeout=5)
+        if item is None:
+            return None
+        job_id = item[1]
+        r.set(f"tubesnip:lease:{job_id}", "1", ex=_REDIS_LEASE_S)
+        return job_id
+    return _queue.get()
+
+
+def _release(job_id: str) -> None:
+    r = _r()
+    if r is not None:
+        r.delete(f"tubesnip:lease:{job_id}")
 
 
 def _worker_loop() -> None:
     while True:
-        job_id = _queue.get()
+        try:
+            job_id = _claim()
+        except Exception:
+            # A transient Redis error (network blip / overloaded server) must
+            # NOT kill the worker thread — log, back off, keep polling. Before
+            # this guard, a timeout in BLPOP permanently killed every worker
+            # and jobs silently stopped being processed.
+            logger.exception("worker claim failed (redis hiccup) — retrying")
+            time.sleep(1)
+            continue
+        if job_id is None:
+            continue  # redis BLPOP timeout — loop and poll again
         logger.debug("worker picked up job %s from queue", job_id)
         try:
             _process(job_id)
@@ -185,7 +492,55 @@ def _worker_loop() -> None:
                 percent=None, error=f"Internal error: {e}", message="Failed",
             )
         finally:
-            _cleanup()
+            try:
+                _release(job_id)
+                _cleanup()
+            except Exception:
+                logger.exception("worker cleanup failed (redis hiccup)")
+
+
+def _sweep_loop() -> None:
+    """Redis-mode sweeper: re-queue jobs whose worker lease expired (crashed
+    node) and delete jobs/files past their TTL. Runs on every node, but the
+    sweep lock makes only one node sweep at a time."""
+    while True:
+        time.sleep(_REDIS_SWEEP_S)
+        try:
+            _sweep_once()
+        except Exception:
+            logger.exception("redis sweeper failed")
+
+
+def _sweep_once() -> None:
+    r = _r()
+    if r is None:
+        return
+    if not r.set("tubesnip:sweep_lock", "1", nx=True, ex=_REDIS_SWEEP_LOCK_S):
+        return  # another node is already sweeping
+    try:
+        now = time.time()
+        for jid, raw in r.hgetall("tubesnip:jobs").items():
+            try:
+                job = json.loads(raw)
+            except Exception:
+                continue
+            if job.get("status") == "running" and not r.exists(f"tubesnip:lease:{jid}"):
+                # Worker died mid-cut → re-queue (cutting is idempotent).
+                job["status"] = "queued"
+                job["stage"] = "queued"
+                job["percent"] = 0
+                job["message"] = "Re-queued after worker loss"
+                r.hset("tubesnip:jobs", jid, json.dumps(job))
+                r.rpush("tubesnip:queue", jid)
+                logger.warning("job %s re-queued (lease expired)", jid)
+            elif now - job.get("created_at", 0) > TTL_SECONDS:
+                r.hdel("tubesnip:jobs", jid)
+                r.srem("tubesnip:ids", jid)
+                r.delete(f"tubesnip:lease:{jid}")
+                shutil.rmtree(job_dir(jid), ignore_errors=True)
+                logger.info("job %s expired (TTL) and removed", jid)
+    finally:
+        r.delete("tubesnip:sweep_lock")
 
 
 def _process(job_id: str) -> None:
@@ -201,7 +556,7 @@ def _process(job_id: str) -> None:
 
     # Real-time log: new line when the stage changes or the integer percent
     # ticks up (throttled to 1% — ffmpeg can emit dozens of updates per second).
-    log_state = {"stage": None, "pct": None}
+    log_state: dict = {"stage": None, "pct": None}
 
     def progress(stage: str, pct: float | None) -> None:
         fields: dict = {"stage": stage}
@@ -221,7 +576,9 @@ def _process(job_id: str) -> None:
             fields["message"] = "Fetching video info…"
         else:
             display = pct or 0.0
-        update_job(job_id, **fields)
+        # Percent monotonicity is enforced atomically inside update_job (the
+        # parallel streams report out of order; a per-callback clamp would race).
+        display = update_job(job_id, **fields) or 0.0
         int_pct = int(display)
         if stage != log_state["stage"]:
             logger.info(
@@ -246,6 +603,25 @@ def _process(job_id: str) -> None:
     except subprocess.TimeoutExpired:
         raise ytdlp_service.YtError("Process took too long — aborted.")
 
+    requested_ms = job["end_ms"] - job["start_ms"]
+
+    # Post-process the cut into the requested container (mp4 is the default,
+    # produced by the cut pipeline already). mov = remux, webm = re-encode.
+    fmt = job.get("format") or "mp4"
+    if fmt != "mp4":
+        update_job(
+            job_id, stage="encode", percent=80,
+            message=f"Converting to {fmt.upper()}…",
+        )
+        logger.info("job %s converting result to %s", job_id, fmt)
+        out_file = ytdlp_service.convert_format(
+            src=out_file,
+            fmt=fmt,
+            out_dir=job_dir(job_id),
+            progress_cb=lambda pct: progress("encode", pct),
+            duration_s=requested_ms / 1000,
+        )
+
     # Verify result: video stream present, audio not lost, A/V in sync.
     update_job(job_id, stage="verify", percent=97, message="Verifying result…")
     logger.info("job %s stage=verify — verifying result (ffprobe)", job_id)
@@ -266,7 +642,6 @@ def _process(job_id: str) -> None:
             )
 
     # Result duration must be sane vs. the request (guards wrong cuts).
-    requested_ms = job["end_ms"] - job["start_ms"]
     actual_duration_ms = round(p["duration"] * 1000)
     snap_delta_ms = abs(actual_duration_ms - requested_ms)
     # Fast mode is already frame-accurate at start (accurate_seek) — the rest

@@ -63,6 +63,9 @@ function resetDom() {
   byId("slider-fill").style.width = "0%";
   byId("slider-range-info").textContent = "00:00:00.000 → 00:00:00.000";
   byId("res-stack").innerHTML = "";
+  for (const b of byId("fmt-stack").querySelectorAll(".res-btn")) {
+    b.classList.toggle("active", b.dataset.format === "mp4");
+  }
   add("no-audio-warn", "hidden");
   byId("cut-btn").disabled = true;
   byId("cut-btn").textContent = "▶ Cut & Download";
@@ -1272,6 +1275,51 @@ describe("resolution stack (replaces dropdown)", () => {
     await bootApp([jsonResponse(INFO_OK)]);
     await loadVideoViaUi();
     expect(byId("res-stack").querySelector('.res-btn[data-value="best"]').classList.contains("active")).toBe(true);
+  });
+});
+
+describe("output format stack (mp4/mov/webm)", () => {
+  it("default mp4 is active and sent in /api/cut payload", async () => {
+    useSyncTimers();
+    await bootApp([
+      jsonResponse(INFO_OK),
+      jsonResponse({ job_id: "job123" }),
+      jsonResponse({ status: "done", download_url: "/api/download/job123", file: "x.mp4", actual_duration_ms: 4000, snap_delta_ms: 100 }),
+    ]);
+    await loadVideoViaUi();
+    expect(byId("fmt-stack").querySelector('.res-btn[data-format="mp4"]').classList.contains("active")).toBe(true);
+    click("cut-btn");
+    await flushAsync();
+    const cutReq = fetchLog.find((f) => f.url === "/api/cut");
+    expect(JSON.parse(cutReq.opts.body).format).toBe("mp4");
+  });
+
+  it("clicking WebM → active state + format webm in payload", async () => {
+    useSyncTimers();
+    await bootApp([
+      jsonResponse(INFO_OK),
+      jsonResponse({ job_id: "job123" }),
+      jsonResponse({ status: "done", download_url: "/api/download/job123", file: "final.webm", actual_duration_ms: 4000, snap_delta_ms: 100 }),
+    ]);
+    await loadVideoViaUi();
+    const webmBtn = byId("fmt-stack").querySelector('.res-btn[data-format="webm"]');
+    webmBtn.click();
+    expect(webmBtn.classList.contains("active")).toBe(true);
+    expect(byId("fmt-stack").querySelector('.res-btn[data-format="mp4"]').classList.contains("active")).toBe(false);
+    click("cut-btn");
+    await flushAsync();
+    const cutReq = fetchLog.find((f) => f.url === "/api/cut");
+    expect(JSON.parse(cutReq.opts.body).format).toBe("webm");
+  });
+
+  it("MOV stays independent of resolution selection", async () => {
+    await bootApp([jsonResponse(INFO_OK)]);
+    await loadVideoViaUi();
+    const movBtn = byId("fmt-stack").querySelector('.res-btn[data-format="mov"]');
+    movBtn.click();
+    // Clicking a resolution must not disturb the format choice.
+    byId("res-stack").querySelector('.res-btn[data-value="720"]').click();
+    expect(movBtn.classList.contains("active")).toBe(true);
   });
 });
 

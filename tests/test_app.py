@@ -24,6 +24,20 @@ def _info_ok(**over):
     return data
 
 
+class TestApiHealth:
+    def test_ok_single_node(self, client, monkeypatch):
+        monkeypatch.setattr(app_module.jobs, "_r", lambda: None)
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "redis": False}
+
+    def test_ok_redis_connected(self, client, monkeypatch):
+        monkeypatch.setattr(app_module.jobs, "_r", lambda: object())
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        assert r.json()["redis"] is True
+
+
 class TestApiInfo:
     def test_ok(self, client, monkeypatch):
         monkeypatch.setattr(app_module.ytdlp_service, "get_video_info", lambda url: _info_ok())
@@ -62,6 +76,8 @@ class TestApiCut:
         [
             ({"url": "https://youtu.be/abc123", "start_ms": 0, "end_ms": 5000, "resolution": "best", "mode": "slow"},
              "mode must"),
+            ({"url": "https://youtu.be/abc123", "start_ms": 0, "end_ms": 5000, "resolution": "best", "mode": "fast", "format": "avi"},
+             "format must"),
             ({"url": "https://youtu.be/abc123", "start_ms": -1, "end_ms": 5000, "resolution": "best", "mode": "fast"},
              "start_ms must"),
             ({"url": "https://youtu.be/abc123", "start_ms": 5000, "end_ms": 5000, "resolution": "best", "mode": "fast"},
@@ -72,6 +88,35 @@ class TestApiCut:
         r = client.post("/api/cut", json=body)
         assert r.status_code == 400
         assert msg in r.json()["detail"]
+
+    def test_format_default_mp4(self, client, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            app_module.jobs, "create_job",
+            lambda payload: captured.update(payload=payload) or "job12345",
+        )
+        monkeypatch.setattr(app_module.ytdlp_service, "extract_video_id", lambda url: "abc123")
+        r = client.post(
+            "/api/cut",
+            json={"url": "https://youtu.be/abc123", "start_ms": 0, "end_ms": 5000},
+        )
+        assert r.status_code == 200
+        assert captured["payload"]["format"] == "mp4"
+
+    @pytest.mark.parametrize("fmt", ["mp4", "mov", "webm"])
+    def test_format_valid_values(self, client, monkeypatch, fmt):
+        captured = {}
+        monkeypatch.setattr(
+            app_module.jobs, "create_job",
+            lambda payload: captured.update(payload=payload) or "job12345",
+        )
+        monkeypatch.setattr(app_module.ytdlp_service, "extract_video_id", lambda url: "abc123")
+        r = client.post(
+            "/api/cut",
+            json={"url": "https://youtu.be/abc123", "start_ms": 0, "end_ms": 5000, "format": fmt},
+        )
+        assert r.status_code == 200
+        assert captured["payload"]["format"] == fmt
 
     def test_invalid_url(self, client, monkeypatch):
         monkeypatch.setattr(app_module.ytdlp_service, "extract_video_id", lambda url: None)
@@ -209,7 +254,12 @@ class TestApiDownload:
         assert r.status_code == 404
         assert "not found" in r.json()["detail"]
 
-    @pytest.mark.parametrize("suffix,expected_type", [("mp4", "video/mp4"), ("mkv", "video/x-matroska")])
+    @pytest.mark.parametrize("suffix,expected_type", [
+        ("mp4", "video/mp4"),
+        ("mkv", "video/x-matroska"),
+        ("mov", "video/quicktime"),
+        ("webm", "video/webm"),
+    ])
     def test_ok(self, client, monkeypatch, tmp_path, suffix, expected_type):
         f = tmp_path / f"result.{suffix}"
         f.write_bytes(b"FAKEVIDEO")

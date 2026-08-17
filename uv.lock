@@ -475,6 +475,19 @@ wheels = [
 ]
 
 [[package]]
+name = "fakeredis"
+version = "2.37.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "redis" },
+    { name = "sortedcontainers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/34/73256495885f68b125b6a95f6a8448e103adf34825746ab8905db52183a0/fakeredis-2.37.0.tar.gz", hash = "sha256:7461f124dcba04a80691d72270b3d1d5cd100ef14dc068c76db825940f3ed799", size = 236339, upload-time = "2026-07-22T20:04:53.753Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/76/e2/964e6ef372770dd7c32f9738b50ff4924f1d3cccd665b568680e4bcb0167/fakeredis-2.37.0-py3-none-any.whl", hash = "sha256:657a2a695a1123be0c13f98db409371497bd94c29d260dd76a9fc7ce1a633745", size = 151526, upload-time = "2026-07-22T20:04:51.979Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.141.1"
 source = { registry = "https://pypi.org/simple" }
@@ -853,6 +866,15 @@ wheels = [
 ]
 
 [[package]]
+name = "redis"
+version = "8.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/99/604f0b666d4c616d891cf77ebb9db6bb21601344c051aebf1b72b9ff915f/redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25", size = 5254356, upload-time = "2026-07-30T08:51:00.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/9d/c5731f6e3608663d4d3656fd8d3aecee8b509c3082818f5a13eae925baea/redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb", size = 560618, upload-time = "2026-07-30T08:50:58.497Z" },
+]
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
@@ -881,6 +903,15 @@ wheels = [
 ]
 
 [[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
+]
+
+[[package]]
 name = "starlette"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -899,12 +930,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "yt-dlp", extra = ["curl-cffi", "default"] },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "fakeredis" },
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -913,12 +946,14 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "redis", specifier = ">=5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
-    { name = "yt-dlp", extras = ["curl-cffi", "default"], specifier = ">=2026.7.4" },
+    { name = "yt-dlp", extras = ["curl-cffi", "default"], url = "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fakeredis", specifier = ">=2.23" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
@@ -1186,12 +1221,9 @@ wheels = [
 
 [[package]]
 name = "yt-dlp"
-version = "2026.7.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/47/c5/9972af4b472b0d55badf841ebafd2f98944cb0ae0f46e11d01f363ea5b91/yt_dlp-2026.7.4.tar.gz", hash = "sha256:b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d21a4432", size = 3049326, upload-time = "2026-07-04T22:42:14.837Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/8a/cd4c9b02c10c563adfe78118310129641900e1cd6de888cfae2452072696/yt_dlp-2026.7.4-py3-none-any.whl", hash = "sha256:f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266", size = 3184705, upload-time = "2026-07-04T22:42:12.989Z" },
-]
+version = "2026.8.17.73947"
+source = { url = "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz" }
+sdist = { hash = "sha256:1b691a73962e14cdd6263ff620a2f8257b7e5edc1b6b2a00f58542aae5d33fdd" }
 
 [package.optional-dependencies]
 curl-cffi = [
@@ -1208,6 +1240,48 @@ default = [
     { name = "websockets" },
     { name = "yt-dlp-ejs" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "brotli", marker = "implementation_name == 'cpython' and sys_platform != 'ios' and extra == 'default'" },
+    { name = "brotli", marker = "implementation_name == 'cpython' and sys_platform != 'ios' and extra == 'pin'", specifier = "==1.2.0" },
+    { name = "brotlicffi", marker = "implementation_name != 'cpython' and extra == 'default'" },
+    { name = "brotlicffi", marker = "implementation_name != 'cpython' and extra == 'pin'", specifier = "==1.2.0.1" },
+    { name = "certifi", marker = "implementation_name == 'cpython' and extra == 'pin-curl-cffi'", specifier = "==2026.7.22" },
+    { name = "certifi", marker = "extra == 'default'" },
+    { name = "certifi", marker = "extra == 'pin'", specifier = "==2026.7.22" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' and extra == 'pin-secretstorage'", specifier = "==2.1.1" },
+    { name = "cffi", marker = "implementation_name == 'cpython' and extra == 'pin-curl-cffi'", specifier = "==2.1.1" },
+    { name = "charset-normalizer", marker = "extra == 'pin'", specifier = "==3.4.9" },
+    { name = "cryptography", marker = "extra == 'pin-secretstorage'", specifier = "==50.0.0" },
+    { name = "curl-cffi", marker = "implementation_name == 'cpython' and extra == 'curl-cffi'", specifier = ">=0.5.10,!=0.6.*,!=0.7.*,!=0.8.*,!=0.9.*,<0.17" },
+    { name = "curl-cffi", marker = "implementation_name == 'cpython' and extra == 'pin-curl-cffi'", specifier = "==0.16.0" },
+    { name = "deno", marker = "extra == 'deno'", specifier = ">=2.6.6" },
+    { name = "deno", marker = "extra == 'pin-deno'", specifier = "==2.9.5" },
+    { name = "idna", marker = "extra == 'pin'", specifier = "==3.18" },
+    { name = "jeepney", marker = "extra == 'pin-secretstorage'", specifier = "==0.9.0" },
+    { name = "mutagen", marker = "extra == 'default'" },
+    { name = "mutagen", marker = "extra == 'pin'", specifier = "==1.48.1" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' and extra == 'pin-secretstorage'", specifier = "==3.0" },
+    { name = "pycparser", marker = "implementation_name == 'cpython' and extra == 'pin-curl-cffi'", specifier = "==3.0" },
+    { name = "pycryptodomex", marker = "extra == 'default'" },
+    { name = "pycryptodomex", marker = "extra == 'pin'", specifier = "==3.23.0" },
+    { name = "requests", marker = "extra == 'default'", specifier = ">=2.32.2,<3" },
+    { name = "requests", marker = "extra == 'pin'", specifier = "==2.34.2" },
+    { name = "secretstorage", marker = "extra == 'pin-secretstorage'", specifier = "==3.5.0" },
+    { name = "secretstorage", marker = "extra == 'secretstorage'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and extra == 'curl-cffi'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and extra == 'pin-curl-cffi'", specifier = "==4.16.0" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' and extra == 'pin-secretstorage'", specifier = "==4.16.0" },
+    { name = "urllib3", marker = "extra == 'default'", specifier = ">=2.0.2,<3" },
+    { name = "urllib3", marker = "extra == 'pin'", specifier = "==2.7.0" },
+    { name = "websockets", marker = "python_full_version >= '3.11' and extra == 'pin'", specifier = "==17.0.1" },
+    { name = "websockets", marker = "python_full_version < '3.11' and extra == 'pin'", specifier = "==16.1.1" },
+    { name = "websockets", marker = "extra == 'default'", specifier = ">=13.0" },
+    { name = "yt-dlp-ejs", marker = "extra == 'default'", specifier = "==0.8.0" },
+    { name = "yt-dlp-ejs", marker = "extra == 'pin'", specifier = "==0.8.0" },
+]
+provides-extras = ["curl-cffi", "default", "deno", "pin", "pin-curl-cffi", "pin-deno", "pin-secretstorage", "secretstorage"]
 
 [[package]]
 name = "yt-dlp-ejs"

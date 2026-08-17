@@ -1,7 +1,7 @@
 # PRD — TubeSnip (Server-Side YouTube Video Slicing/Trimming)
 
-**Status:** Draft v2 — implementation M0–M6 complete (16 Aug 2026); implementation findings in §19
-**Audience:** Single user (personal), self-hosted
+**Status:** Draft v2 — implementation M0–M9 partial complete (17 Aug 2026): M0–M8 + Redis-backed M9 done; shared result storage is infra (mount NFS/EFS/S3). Implementation findings in §19; multi-node/zero-downtime roadmap in §20
+**Audience:** Single user (personal), self-hosted — with a scaling ambition to many servers
 **Document purpose:** Research results + implementation plan before writing code.
 
 ---
@@ -92,12 +92,14 @@ The output is always a video file (mp4) that **keeps its audio**. There is no au
 
 ## 5. Non-Functional Requirements
 
-- **Lightweight:** small memory footprint; the core process only shells out to `yt-dlp` + `ffmpeg` as subprocesses; no database (the job registry is a simple JSON file).
-- **Fast / bandwidth-efficient:** use `--download-sections` so only the cut part is downloaded (not the whole video).
+- **Lightweight:** small memory footprint; the core process only shells out to `yt-dlp` + `ffmpeg` as subprocesses; no database (the job registry is a JSON file, written atomically — see §20).
+- **Fast / bandwidth-efficient:** use `--download-sections` so only the cut part is downloaded (not the whole video); video metadata is cached (1-day TTL); identical requests reuse a finished job instead of re-cutting.
 - **Private:** no accounts, no telemetry; all data stays local.
-- **Single user:** a simple job queue (1 job running at a time; a second job waits in line).
+- **Concurrent:** a small worker pool (default 2, `TUBESNIP_CONCURRENCY`) processes jobs in parallel — capped deliberately because each job already pulls 2 googlevideo streams.
 - **Error-tolerant:** clear error messages (private video, age-restricted, geo-restricted, live, etc.).
+- **No lost jobs:** atomic job persistence + restart recovery — a job interrupted by a restart is re-queued, never stuck (`running` forever) and never silently dropped.
 - **Clean:** temp files are deleted automatically (TTL) after download / failure.
+- **Scaling ambition (future):** the user wants Dockerized, multi-node, multi-container, zero-downtime deployment. The current single-node in-memory design must evolve (see §20 for the honest gap + roadmap).
 
 ---
 
@@ -112,7 +114,7 @@ The output is always a video file (mp4) that **keeps its audio**. There is no au
 | Downloader       | **yt-dlp** (pip, extra `[default,curl-cffi]`, nightly channel)          | The only reliable tool for YouTube; `--download-sections` + automatic muxing.                                                                                                                         |
 | Video processing | **ffmpeg + ffprobe** (system binaries)                                  | Cut, mux, verify.                                                                                                                                                                                    |
 | Frontend         | **HTML + CSS + vanilla JS** single page, served by FastAPI (StaticFiles) | No framework, no build step, no Node — the most "sat set".                                                                                                                                            |
-| Job store        | JSON file + per-job temp directory                                      | Single user → a database is overkill.                                                                                                                                                                |
+| Job store        | JSON file + per-job temp directory (atomic writes)                    | Single-node: a database is overkill. Multi-node needs a shared store — see §20. |
 | JS runtime       | **deno** (yt-dlp's default for `yt-dlp-ejs`)                            | Agreed with the user: use yt-dlp's default runtime (deno already installed on the system); no `--js-runtimes` flags (see §3.5).                                                                        |
 
 Estimated load: idle < 100 MB RAM; while a job runs, the main load is just ffmpeg/yt-dlp
@@ -267,11 +269,13 @@ tubesnip/
 
 ## 14. Configuration & Deployment
 
-- Env vars: `TUBESNIP_DATA_DIR` (default `./data`), `TUBESNIP_JOB_TTL_H` (default 24), port.
-- System dependencies: `python3.10+`, `ffmpeg`, `deno` (yt-dlp-ejs runtime + frontend tests); Python via **uv**: `uv venv` +
+- Env vars: `TUBESNIP_DATA_DIR` (default `./data`), `TUBESNIP_JOB_TTL_H` (default 24), `TUBESNIP_CONCURRENCY` (default 2), `TUBESNIP_COOKIES` / `TUBESNIP_COOKIES_FROM_BROWSER`, `TUBESNIP_LOG_LEVEL`, `TUBESNIP_LOG_FILE`, port.
+- System dependencies: `python3.12+`, `ffmpeg`, `deno` (yt-dlp-ejs runtime + frontend tests); Python via **uv**: `uv venv` +
   `uv add fastapi uvicorn "yt-dlp[default,curl-cffi]"` (nightly channel).
 - Run: `uv run tubesnip` (or `uv run uvicorn tubesnip.app:app --host 127.0.0.1 --port 8000`) (local access; if remote is needed, put a reverse proxy + simple auth in front — out of scope).
 - `.gitignore` file: `data/`, `*.part`, `.venv/`.
+- **Single process per container.** Do NOT use `uvicorn --workers N` — job state, the worker pool, and SSE subscribers live in-process; multiple uvicorn workers in one process tree would each have their own isolated state (broken job tracking). Scale by running more containers, not more uvicorn workers (see §20).
+- **Docker (planned, M8):** multi-stage image (uv installs deps → runtime stage with `deno` + `ffmpeg`/`ffprobe` + the venv), `data/` on a volume, `SIGTERM` graceful stop. On restart, `jobs.load()` re-queues any interrupted `running` job — nothing is lost.
 
 ---
 
@@ -289,6 +293,9 @@ tubesnip/
 | M5c       | Fast mode **frame-accurate at the start**: `-ss input + -c copy` without `-avoid_negative_ts make_zero` (that flag disables accurate_seek → keyframe snap; on merge it also pushes video back to a keyframe) | 52s cut: 0.035s delta (was ±0.6–1s); first frame a B-frame; E2E tolerance lowered 2.5→1.0s; fast duration guard 15→2s | ✅ |
 | M6        | Apply `prototype.htm` design to the frontend: light theme + brand header, studio grid (preview + controls left, parameters right), resolution becomes a **button stack** (from `/api/info`), cut mode becomes **3 directly-visible cards** (not an accordion), processing card + **4-step pipeline** from SSE stages, **result card** (resolution/duration/**est. size from bitrate** badges + download) | Old structure & IDs preserved (CSS/JS separate); frontend ≥ 95% coverage; verified live (embed, res-stack, pipeline, result card) | ✅ |
 | M6b       | **Set Start / Set End** reading the playhead from the **plyr player** (polling `currentTime` 250 ms → "Playhead Position" chip); **est. file size** in the result card from `bitrate` (yt-dlp `tbr` kbps, sent by `/api/info`) × result duration | Real-time playhead; set start/end buttons change the cut range; accurate size estimate (verified live: 30s @ 1080p → 12.3 MB); backend + frontend ≥ 95% coverage | ✅ |
+| M7        | **Parallel + robust single-node**: worker pool (`TUBESNIP_CONCURRENCY`, default 2), video+audio downloaded in parallel per job, weighted combined progress, video-info cache (1-day TTL), job dedup (identical params → reuse finished/follow running), atomic `jobs.json` writes (temp+rename), restart recovery (running jobs re-queued) | Jobs process concurrently; identical requests don't re-cut; restart never loses/sticks a job; crash never corrupts `jobs.json` | ✅ |
+| M8        | **Dockerize** (multi-stage Alpine image: uv-built musl venv, ffmpeg via `apk --no-cache`, deno COPYed from `denoland/deno:alpine` — no apt/curl layers; `data/` volume; `/api/health`; `compose.yml` Swarm stack with external Redis + `start-first` rolling updates) | `docker compose up` runs TubeSnip; verified live in-container: yt-dlp nightly + deno JS runtime + ffmpeg h264/vp9/opus + `/api/info` end-to-end | ✅ |
+| M9        | **Multi-node / zero-downtime**: shared job store + queue + SSE fan-out in **Redis** (`TUBESNIP_REDIS_URL`, optional), worker **lease + heartbeat + sweeper** (dead node → job re-queued, idempotent re-cut), cross-node dedup, shared result storage hook (`TUBESNIP_SHARED_DIR`) | Two+ containers share jobs/queue/leases/SSE; a crashed node's jobs are re-claimed; rolling deploys don't lose a job. Cross-node downloads need shared storage mounted | 🟨 store/queue/lease/SSE done — shared storage is infra (mount NFS/EFS/S3) |
 
 ---
 
@@ -384,3 +391,38 @@ ffprobe -v error -show_entries stream=codec_type,start_time -of json data/jobs/<
 - **Killing the server during testing:** `kill` on the `uv run` wrapper doesn't kill the uvicorn child (a leftover process keeps the port); use `pkill -f "uvicorn tubesnip.app"`.
 - Automated tests: `uv run pytest` (160 tests = 156 unit + 4 E2E, coverage ≥ 95%) + `deno test` (74 steps, app.js coverage 98.83% / time.js 100%) — the 95% minimum is enforced automatically (see README "Tests & coverage").
 - **yt-dlp on the system PATH can break impersonation:** Homebrew binaries are built with Python without `curl_cffi` → all impersonate targets "unavailable" → videos rejected ("Impersonate target chrome is not available"). Fix: `_run`/`_run_streaming` use a `PATH` env that favors the project venv's `bin/` (the venv binary is installed with `yt-dlp[default,curl-cffi]`).
+
+---
+
+## 20. Multi-node / zero-downtime plan (M8–M9, honest gap analysis)
+
+### 20.1 Where we are (17 Aug 2026)
+
+Redis-backed shared state is **implemented** (`TUBESNIP_REDIS_URL`, optional): the job
+store, queue, worker lease + heartbeat, dedup, and SSE fan-out all run in Redis when
+configured, and fall back to the in-process single-node design when it isn't. What still
+needs infra is the result files.
+
+| Component    | Single-node (no Redis)                              | Multi-node (Redis)                            |
+| ------------ | --------------------------------------------------- | --------------------------------------------- |
+| Job store    | `_jobs` dict + `jobs.json` (atomic writes)          | Redis hash `tubesnip:jobs` ✅                  |
+| Job queue    | in-process `queue.Queue`                            | Redis list + BLPOP + **lease** (heartbeat) ✅  |
+| Dead worker  | restart recovery re-queues                          | sweeper re-queues expired leases ✅            |
+| SSE          | in-process pub/sub                                  | Redis pub/sub → per-node listener fan-out ✅   |
+| Dedup        | in-process scan                                     | Redis scan (all nodes see the same jobs) ✅    |
+| TTL cleanup  | worker `_cleanup`                                   | sweeper (single node sweeps via lock) ✅       |
+| Result files | local `data/jobs/<id>/`                             | **needs `TUBESNIP_SHARED_DIR`** (NFS/EFS/S3 mount) — ⏳ infra |
+| Cut scratch  | local temp + subprocesses                           | node-local scratch, final file on shared storage ⏳ |
+
+The **lease is the load-bearing piece** for "no lost job": every `update_job` (every
+progress tick) refreshes `tubesnip:lease:{id}` (120s TTL). If a node dies mid-cut, the
+lease expires and the next sweep re-queues the job — idempotent cutting means it just gets
+re-cut by another node. Rolling deploys work: `SIGTERM` an old container, its abandoned
+jobs are re-claimed automatically.
+
+### 20.3 What "no lost data/job" means today (already guaranteed single-node)
+
+- **Crash during write:** `jobs.json` is written atomically (temp file + `os.replace`) — a crash mid-write leaves the previous valid file, never torn JSON.
+- **Crash between writes:** the authoritative state is the in-memory dict; a killed process loses only the last seconds of progress ticks, and the job's *request* is what matters — it's persisted at creation (`create_job` → `_save`) and re-queued on restart if it was mid-flight.
+- **Result never served broken:** ffprobe verification + sync/duration guards reject bad output before it can be downloaded (§10, §19.2).
+- **Dedup re-serves** a finished job only while its result file still exists; otherwise it re-cuts (no stale/broken downloads).

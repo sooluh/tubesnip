@@ -1,5 +1,6 @@
 # Tests for the ytdlp_service.py pipeline (subprocess/requests mocked, no network).
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,46 @@ class TestGetVideoInfo:
         assert res["has_audio"] is False
         assert res["resolutions"] == []
 
+    def test_second_call_served_from_cache(self, monkeypatch):
+        """Repeated /api/info for the same video skips the slow yt-dlp extract."""
+        info = {
+            "id": "vid123", "title": "T", "duration": 12.5, "is_live": False,
+            "formats": [{"vcodec": "vp9", "height": 720, "fps": 30, "ext": "webm", "tbr": 100}],
+        }
+        calls = {"n": 0}
+
+        class S:
+            def run(self, args, **kw):
+                calls["n"] += 1
+                return _Proc(0, json.dumps(info))
+
+            def Popen(self, cmd, **kw):
+                raise AssertionError("Popen not expected")
+
+        monkeypatch.setattr(ys, "subprocess", S())
+        r1 = ys.get_video_info("https://youtu.be/vid123")
+        r2 = ys.get_video_info("https://www.youtube.com/watch?v=vid123")  # different URL, same video
+        assert r1 == r2
+        assert calls["n"] == 1  # second call hit the cache
+
+    def test_cache_expires(self, monkeypatch):
+        info = {"id": "vid123", "title": "T", "duration": 12.5, "is_live": False, "formats": []}
+        calls = {"n": 0}
+
+        class S:
+            def run(self, args, **kw):
+                calls["n"] += 1
+                return _Proc(0, json.dumps(info))
+
+            def Popen(self, cmd, **kw):
+                raise AssertionError("Popen not expected")
+
+        monkeypatch.setattr(ys, "subprocess", S())
+        monkeypatch.setattr(ys, "_INFO_CACHE_TTL_S", 0.0)
+        ys.get_video_info("https://youtu.be/vid123")
+        ys.get_video_info("https://youtu.be/vid123")
+        assert calls["n"] == 2  # TTL expired → re-extracted
+
 
 class TestRunStreaming:
     def test_success(self, monkeypatch):
@@ -191,13 +232,31 @@ class TestReencode:
             "progress=end",
         ]
         monkeypatch.setattr(ys, "subprocess", routing_subprocess(popen_cls=fake_popen([], stdout_lines=out)))
+        monkeypatch.setattr(ys, "_vaapi_best", lambda *a: None)  # CPU path (deterministic)
         cbs = []
         ys._reencode(tmp_path / "in.mp4", 2000, 6000, tmp_path / "out.mp4", lambda st, p: cbs.append((st, p)))
         assert cbs[0] == ("encode", 62.5)
         assert cbs[-1] == ("encode", 100.0)
 
+    def test_hw_h264_when_vaapi_available(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_ffmpeg(cmd, dur, cb):
+            captured["cmd"] = cmd
+            cb(10.0)
+
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", fake_ffmpeg)
+        monkeypatch.setattr(ys, "_vaapi_best", lambda *a: ("/dev/dri/renderD128", "h264_vaapi"))
+        ys._reencode(tmp_path / "in.mp4", 0, 1000, tmp_path / "out.mp4", lambda st, p: None)
+        assert "-vaapi_device" in captured["cmd"]
+        assert "/dev/dri/renderD128" in captured["cmd"]
+        assert "h264_vaapi" in captured["cmd"]
+        assert any("hwupload" in a for a in captured["cmd"])
+        assert "libx264" not in captured["cmd"]
+
     def test_failure(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ys, "subprocess", routing_subprocess(popen_cls=fake_popen(["Error"], returncode=1)))
+        monkeypatch.setattr(ys, "_vaapi_best", lambda *a: None)
         with pytest.raises(ys.YtError, match="re-encode failed"):
             ys._reencode(tmp_path / "in.mp4", 0, 1000, tmp_path / "out.mp4", lambda st, p: None)
 
@@ -206,14 +265,24 @@ class TestProbe:
     def test_success(self, monkeypatch):
         data = {
             "streams": [
-                {"codec_type": "video", "start_time": "0.5"},
-                {"codec_type": "audio", "start_time": "0.5"},
+                {"codec_type": "video", "codec_name": "h264", "start_time": "0.5"},
+                {"codec_type": "audio", "codec_name": "aac", "start_time": "0.5"},
             ],
             "format": {"duration": "4.0"},
         }
         monkeypatch.setattr(ys, "subprocess", routing_subprocess(ytdlp_stdout=json.dumps(data)))
         p = ys.probe("/tmp/x.mp4")
-        assert p == {"has_video": True, "has_audio": True, "duration": 4.0, "video_start": 0.5, "audio_start": 0.5}
+        assert p == {
+            "has_video": True, "has_audio": True, "duration": 4.0,
+            "video_start": 0.5, "audio_start": 0.5, "video_codec": "h264",
+        }
+
+    def test_no_video_codec(self, monkeypatch):
+        data = {"streams": [{"codec_type": "audio", "codec_name": "aac"}], "format": {"duration": "1.0"}}
+        monkeypatch.setattr(ys, "subprocess", routing_subprocess(ytdlp_stdout=json.dumps(data)))
+        p = ys.probe("/tmp/x.mp4")
+        assert p["has_video"] is False
+        assert p["video_codec"] is None
 
     def test_ffprobe_error(self, monkeypatch):
         monkeypatch.setattr(ys, "subprocess", routing_subprocess(ytdlp_rc=1, stderr="No such file or directory"))
@@ -519,8 +588,15 @@ class _FakeRangeProxy:
     def __exit__(self, *a):
         self.exited = True
 
-    def byte_pct(self):
+    def byte_pct(self) -> float | None:
         return None
+
+
+class _PctRangeProxy(_FakeRangeProxy):
+    """Range proxy whose byte_pct always returns a value (60%)."""
+
+    def byte_pct(self):
+        return 60.0
 
 
 class TestProxyCut:
@@ -720,7 +796,10 @@ class TestProxyCut:
                     return _Proc(0, _ytdlp_out(args))
                 if args and args[0] == "ffprobe":
                     calls["probe"] += 1
-                    if calls["probe"] == 1:  # video part, first attempt: empty
+                    # Deterministic despite parallel threads: the FIRST video
+                    # part probe is empty (throttled), any later one is valid.
+                    if Path(args[-1]).name.startswith("sec0") and "video_empty" not in calls:
+                        calls["video_empty"] = True
                         return _Proc(
                             0, '{"streams": [{"codec_type": "audio"}], "format": {"duration": "10"}}', ""
                         )
@@ -749,10 +828,11 @@ class TestProxyCut:
         # Attempt 2 uses the combined progressive format `b` → one stream, no merge.
         assert final == tmp_path / "sec0.mp4"
         assert final.exists()
-        # Attempt 1 failed (video probe), attempt 2: video probe only (1 stream).
-        assert calls["probe"] == 2
-        # Proxy: attempt 1 video (failed), attempt 2 video → 2 total, cleaned up.
-        assert len(_FakeRangeProxy.instances) == 2
+        # Attempt 1 ran both streams in parallel (video probe 1, audio probe 2),
+        # attempt 2: video probe only (1 stream) → 3 probes total.
+        assert calls["probe"] == 3
+        # Proxy: attempt 1 video + audio (failed), attempt 2 video → 3 total, cleaned up.
+        assert len(_FakeRangeProxy.instances) == 3
         assert all(p.exited for p in _FakeRangeProxy.instances)
         # The second attempt really used the progressive `b` selector.
         b_runs = [r for r in sub.runs if "-f" in r and r[r.index("-f") + 1] == "b"]
@@ -773,6 +853,59 @@ class TestProxyCut:
             ys._proxy_cut("https://youtu.be/vid123", "bv*+ba/b", 0, 1000, tmp_path, lambda st, p: None)
         assert len(_FakeRangeProxy.instances) == 1
         assert _FakeRangeProxy.instances[0].exited
+
+    def test_parallel_rich_params_and_byte_progress(self, monkeypatch, tmp_path):
+        """clen/dur URL params → byte-based progress; webm audio → .webm part."""
+        sub = _MakeFilesSubprocess(
+            ytdlp_stdout=(
+                "http://v/url?clen=100000&dur=60.0&mime=video%2Fmp4\n"
+                "http://a/url?clen=5000&dur=60.0&mime=audio%2Fwebm\n"
+            )
+        )
+        monkeypatch.setattr(ys, "subprocess", sub)
+
+        def fake_progress(cmd, dur, cb):
+            Path(cmd[-1]).write_text("x")
+            cb(10.0)  # ffmpeg out_time → callback (byte_pct overrides it)
+
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", fake_progress)
+        _FakeRangeProxy.instances = []
+        monkeypatch.setattr(ys, "_RangeProxy", _PctRangeProxy)
+        seen: list[tuple] = []
+        final = ys._proxy_cut(
+            "https://youtu.be/vid123", "bv*+ba/b", 2000, 6000, tmp_path,
+            lambda st, p: seen.append((st, p)),
+        )
+        assert final == tmp_path / "merged.mp4"
+        assert final.exists()
+        # Audio part used .webm (mime=audio/webm).
+        assert (tmp_path / "sec1.webm").exists()
+        # Both streams report byte_pct 60 → video-weighted combined ≈ 60 during
+        # the download, then the merge reports 98+ and the final tick is 100.
+        pcts = [p for st, p in seen if st == "download" and p is not None]
+        assert any(50 < p < 70 for p in pcts)
+        assert any(p > 98 for p in pcts)
+        assert pcts[-1] == 100.0
+
+    def test_empty_part_raises(self, monkeypatch, tmp_path):
+        """No output file written → 'empty result' error (raised after join)."""
+        sub = _MakeFilesSubprocess(ytdlp_stdout="http://v/url\nhttp://a/url\n")
+        monkeypatch.setattr(ys, "subprocess", sub)
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", lambda cmd, dur, cb: None)
+        with pytest.raises(ys.YtError, match="empty result"):
+            ys._proxy_cut("https://youtu.be/vid123", "bv*+ba/b", 0, 1000, tmp_path, lambda st, p: None)
+
+    def test_worker_non_yt_error_propagated(self, monkeypatch, tmp_path):
+        """A non-YtError crash in a worker thread → wrapped as a clear error."""
+        sub = _MakeFilesSubprocess(ytdlp_stdout="http://v/url\n")
+        monkeypatch.setattr(ys, "subprocess", sub)
+
+        def boom(cmd, dur, cb):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", boom)
+        with pytest.raises(ys.YtError, match="Stream cut failed: boom"):
+            ys._proxy_cut("https://youtu.be/vid123", "bv*/b", 0, 1000, tmp_path, lambda st, p: None)
 
     def test_run_ffmpeg_progress(self, monkeypatch):
         # -progress pipe:1 → out_time_ms on stdout (milliseconds).
@@ -855,7 +988,7 @@ class TestProxyCut:
             req = urllib.request.Request(p.url, headers={"Range": "bytes=500-"})
             resp = urllib.request.urlopen(req, timeout=5)
             assert resp.read() == b"DATA" * 10
-        assert captured["headers"]["Range"] == "bytes=500-1049075"  # 500 + window(1MiB) - 1
+        assert captured["headers"]["Range"] == "bytes=500-4194803"  # 500 + window(4MiB) - 1
 
     def test_range_proxy_without_range(self, monkeypatch):
         captured = {}
@@ -877,7 +1010,74 @@ class TestProxyCut:
             resp = urllib.request.urlopen(req, timeout=5)
             assert resp.read() == b"X" * 8
         # rqh=1: the first request must carry a Range
-        assert captured["headers"]["Range"] == "bytes=0-1048575"
+        assert captured["headers"]["Range"] == "bytes=0-4194303"
+
+    def test_range_proxy_forward_closed_end(self, monkeypatch):
+        """A Range with an explicit end is forwarded as-is (no re-closing)."""
+        captured = {}
+
+        class Resp:
+            status_code = 206
+            headers = {"Content-Range": "bytes 500-1000/73732097"}
+            content = b"Y" * 8
+
+        def fake_get(url, **kw):
+            captured["headers"] = kw["headers"]
+            return Resp()
+
+        monkeypatch.setattr(ys.crequests, "get", fake_get)
+        with ys._RangeProxy("http://target/v") as p:
+            import urllib.request
+
+            req = urllib.request.Request(p.url, headers={"Range": "bytes=500-1000"})
+            resp = urllib.request.urlopen(req, timeout=5)
+            assert resp.read() == b"Y" * 8
+        assert captured["headers"]["Range"] == "bytes=500-1000"
+
+    def test_range_proxy_502_on_upstream_error(self, monkeypatch):
+        """Upstream (googlevideo) request fails → the proxy replies 502, ffmpeg sees it."""
+        def fake_get(url, **kw):
+            raise ConnectionError("connection dropped")
+
+        monkeypatch.setattr(ys.crequests, "get", fake_get)
+        with ys._RangeProxy("http://target/v") as p:
+            import urllib.error
+            import urllib.request
+
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                urllib.request.urlopen(p.url, timeout=5)
+            assert excinfo.value.code == 502
+
+    def test_byte_pct_math(self):
+        p = ys._RangeProxy("http://x")
+        assert p.byte_pct() is None  # no total/fraction yet
+        p.total_size = 100
+        p.expected_frac = 0.5
+        p.bytes_served = 25
+        assert p.byte_pct() == 50.0
+        p.bytes_served = 500
+        assert p.byte_pct() == 100.0  # clamped
+        # expected_total (clen param) used when Content-Range has no total.
+        p2 = ys._RangeProxy("http://x")
+        p2.expected_total = 100
+        p2.expected_frac = 1.0
+        p2.bytes_served = 60
+        assert p2.byte_pct() == 60.0
+
+    def test_byte_pct_frac_estimated_from_first_range(self):
+        """No `dur` param → fraction estimated from ffmpeg's first Range offset
+        so the bar keeps moving during the (throttled) decode phase."""
+        p = ys._RangeProxy("http://x")
+        p.total_size = 1000
+        p.first_start = 400  # ffmpeg seeks to byte 400
+        p.bytes_served = 300
+        # frac = (1000-400)/1000 = 0.6 → 300/(1000*0.6) = 50%
+        assert p.byte_pct() == 50.0
+
+    def test_progressive_selector(self):
+        assert ys._progressive_selector("bv*+ba/b") == "b"
+        assert ys._progressive_selector("bv*[height<=1080]+ba/b") == "b[height<=1080]"
+        assert ys._progressive_selector("bv*/b") == "b"
 
 
 class TestHelpers:
@@ -914,3 +1114,142 @@ class TestHelpers:
         assert ys._collect_resolutions(formats) == [
             {"height": 480, "fps": 30, "codec": "VP9", "ext": "mp4", "bitrate": 0}
         ]
+
+
+class TestConvertFormat:
+    def test_mp4_passthrough(self, tmp_path):
+        src = tmp_path / "out.mp4"
+        src.write_text("x")
+        result = ys.convert_format(src, "mp4", tmp_path, lambda p: None, 5.0)
+        assert result == src
+        assert src.exists()  # no conversion, source kept
+
+    def test_mov_remux(self, monkeypatch, tmp_path):
+        src = tmp_path / "out.mp4"
+        src.write_text("x")
+        captured = {}
+
+        def fake_ffmpeg(cmd, dur, cb):
+            captured["cmd"] = cmd
+            cb(100.0)
+
+        monkeypatch.setattr(ys, "probe", lambda path: {"video_codec": "h264"})
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", fake_ffmpeg)
+        cbs = []
+        result = ys.convert_format(src, "mov", tmp_path, cbs.append, 5.0)
+        assert result == tmp_path / "final.mov"
+        assert not src.exists()  # source removed on success
+        assert captured["cmd"][-1] == str(tmp_path / "final.mov")
+        assert "copy" in captured["cmd"]  # H.264 is MOV-safe → remux, not re-encode
+        assert "libx264" not in captured["cmd"]
+        assert cbs == [100.0]
+
+    def test_mov_reencodes_when_av1(self, monkeypatch, tmp_path):
+        """AV1 can't live in MOV ('av1 only supported in MP4 and AVIF') →
+        re-encode video to H.264 instead of failing the remux."""
+        src = tmp_path / "out.mp4"
+        src.write_text("x")
+        captured = {}
+
+        def fake_ffmpeg(cmd, dur, cb):
+            captured["cmd"] = cmd
+            cb(50.0)
+
+        monkeypatch.setattr(ys, "probe", lambda path: {"video_codec": "av1"})
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", fake_ffmpeg)
+        monkeypatch.setattr(ys, "_vaapi_best", lambda *a: None)  # CPU x264
+        result = ys.convert_format(src, "mov", tmp_path, lambda p: None, 5.0)
+        assert result == tmp_path / "final.mov"
+        assert "libx264" in captured["cmd"]  # re-encoded
+        assert "-c:v" in captured["cmd"]  # explicit video encode (remux has none)
+
+    def test_webm_reencode(self, monkeypatch, tmp_path):
+        src = tmp_path / "out.mp4"
+        src.write_text("x")
+        captured = {}
+
+        def fake_ffmpeg(cmd, dur, cb):
+            captured["cmd"] = cmd
+            cb(50.0)
+
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", fake_ffmpeg)
+        monkeypatch.setattr(ys, "_vaapi_best", lambda *a: None)  # CPU path
+        cbs = []
+        result = ys.convert_format(src, "webm", tmp_path, cbs.append, 5.0)
+        assert result == tmp_path / "final.webm"
+        assert not src.exists()
+        assert "libvpx-vp9" in captured["cmd"] and "libopus" in captured["cmd"]
+        assert cbs == [50.0]
+
+    def test_webm_hw_when_vaapi_available(self, monkeypatch, tmp_path):
+        src = tmp_path / "out.mp4"
+        src.write_text("x")
+        captured = {}
+
+        def fake_ffmpeg(cmd, dur, cb):
+            captured["cmd"] = cmd
+            cb(50.0)
+
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", fake_ffmpeg)
+        monkeypatch.setattr(ys, "_vaapi_best", lambda *a: ("/dev/dri/renderD128", "av1_vaapi"))
+        result = ys.convert_format(src, "webm", tmp_path, lambda p: None, 5.0)
+        assert result == tmp_path / "final.webm"
+        assert "av1_vaapi" in captured["cmd"]
+        assert any("hwupload" in a for a in captured["cmd"])
+        assert "libvpx" not in captured["cmd"]
+
+    def test_failure_keeps_source(self, monkeypatch, tmp_path):
+        src = tmp_path / "out.mp4"
+        src.write_text("x")
+
+        def boom(cmd, dur, cb):
+            raise ys.YtError("ffmpeg exited with code 1")
+
+        monkeypatch.setattr(ys, "probe", lambda path: {"video_codec": "h264"})
+        monkeypatch.setattr(ys, "_run_ffmpeg_progress", boom)
+        with pytest.raises(ys.YtError, match="Format conversion to mov failed"):
+            ys.convert_format(src, "mov", tmp_path, lambda p: None, 5.0)
+        assert src.exists()  # source kept on failure
+
+
+class TestVaapiBest:
+    def _clear(self):
+        ys._vaapi_best.cache_clear()
+
+    def test_no_devices(self):
+        self._clear()
+        assert ys._vaapi_best(()) is None
+
+    def test_first_working_encoder_wins(self, monkeypatch):
+        self._clear()
+        rc_by_enc = {"av1_vaapi": 1, "vp9_vaapi": 1, "h264_vaapi": 0}
+
+        class S:
+            def run(self, args, **kw):
+                enc = args[args.index("-c:v") + 1]
+                return _Proc(rc_by_enc[enc])
+
+        monkeypatch.setattr(ys, "subprocess", S())
+        assert ys._vaapi_best(("/dev/dri/renderD128",)) == (
+            "/dev/dri/renderD128", "h264_vaapi",
+        )
+
+    def test_all_fail(self, monkeypatch):
+        self._clear()
+
+        class S:
+            def run(self, args, **kw):
+                return _Proc(1)
+
+        monkeypatch.setattr(ys, "subprocess", S())
+        assert ys._vaapi_best(("/dev/dri/renderD128",)) is None
+
+    def test_run_exception_skips_encoder(self, monkeypatch):
+        self._clear()
+
+        class S:
+            def run(self, args, **kw):
+                raise subprocess.TimeoutExpired("ffmpeg", 60)
+
+        monkeypatch.setattr(ys, "subprocess", S())
+        assert ys._vaapi_best(("/dev/dri/renderD128",)) is None

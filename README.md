@@ -6,8 +6,8 @@ download the result. Audio is preserved and stays in sync.
 
 Stack: Python FastAPI + [yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg, with an
 environment managed by [uv](https://docs.astral.sh/uv/). The JS runtime for
-`yt-dlp-ejs` and the frontend tests is **deno** (already installed). The frontend is
-vanilla single-page JS (no build step).
+`yt-dlp-ejs` and the frontend tests is **deno**. The frontend is vanilla single-page
+JS (no build step).
 
 ## Setup
 
@@ -32,7 +32,7 @@ Open http://127.0.0.1:8000
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/info` | POST | `{ "url": "…" }` → duration, title, available resolutions, `has_audio` |
-| `/api/cut` | POST | `{ url, start_ms, end_ms, resolution, mode }` → `{ job_id }` (mode: `fast` \| `accurate`) |
+| `/api/cut` | POST | `{ url, start_ms, end_ms, resolution, mode, format }` → `{ job_id }` (mode: `fast` \| `accurate`; format: `mp4` default \| `mov` \| `webm`) |
 | `/api/jobs/{id}` | GET | Job status: `queued` → `running` → `done` \| `error` (+ percent & message) |
 | `/api/download/{id}` | GET | Download the mp4/mkv result (files are cleaned up automatically after TTL) |
 
@@ -108,6 +108,57 @@ Note: private/age-restricted videos only work if the logged-in account actually 
 access to them. Videos **without audio** can still be cut — the result is video-only
 with a UI warning.
 
+## Configuration (env vars)
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `TUBESNIP_HOST` / `TUBESNIP_PORT` | `127.0.0.1` / `8000` | Bind address. In containers set `TUBESNIP_HOST=0.0.0.0` |
+| `TUBESNIP_CONCURRENCY` | `2` | Concurrent cut jobs. Each job already pulls 2 googlevideo streams, so keep it small; `1` = strictly serial |
+| `TUBESNIP_JOB_TTL_H` | `24` | Result files / job records retention (hours) |
+| `TUBESNIP_DATA_DIR` | `data` | Runtime dir: `jobs.json` + per-job temp files |
+| `TUBESNIP_REDIS_URL` | – | **Optional multi-node mode.** When set, the job store, queue, worker lease and SSE fan-out live in Redis (shared across containers). Empty = single-node in-memory + JSON |
+| `TUBESNIP_SHARED_DIR` | – | **Optional shared result storage** (mount NFS/EFS/S3 here across nodes). When set, per-job dirs live under `<shared>/jobs` so any node can serve a download. Required for cross-node downloads |
+| `TUBESNIP_COOKIES` / `TUBESNIP_COOKIES_FROM_BROWSER` | – | yt-dlp cookies (login — fixes YouTube throttling on servers) |
+| `TUBESNIP_LOG_LEVEL` | `INFO` | `DEBUG` shows ffmpeg/yt-dlp commands + raw progress |
+| `TUBESNIP_LOG_FILE` | `data/logs/app.log` | `off` = console only |
+
+## Deployment: Docker / multi-node / zero downtime
+
+**Single container (recommended for personal use):**
+- Run exactly **one app process per container**. Do **not** use `uvicorn --workers N` — job state, the worker pool, and SSE subscribers are in-process; extra uvicorn workers each get their own isolated (broken) state. Scale by running more containers, not more uvicorn workers.
+- Persist `data/` on a volume so jobs survive container restarts.
+
+The image is **Alpine-based** (small): ffmpeg/ffprobe via `apk --no-cache`, deno COPYed
+from the official `denoland/deno:alpine` image (no curl install), the venv built with uv
+on Alpine (musl wheels), nightly yt-dlp pinned via `[tool.uv.sources]`, plus a `/api/health`
+healthcheck. `build_editable` no longer requires `README.md` in the image (removed the
+`readme` field from `pyproject.toml`).
+
+**Local / single host (Compose v2):**
+```bash
+docker compose -f compose.yml build
+docker compose -f compose.yml up -d        # app + your external redis
+```
+
+**Swarm (multi-node, zero-downtime rolling updates):** Redis is **external** by design
+— run it yourself (container on the same overlay network, host, or managed service) and
+point `TUBESNIP_REDIS_URL` at it; it is not defined in `compose.yml`.
+```bash
+docker network create -d overlay tubesnip-net
+# (deploy redis:7 to that network, or use an external host)
+docker stack deploy -c compose.yml tubesnip   # replicas: 2, start-first rolling update
+docker service update --image tubesnip:v2 tubesnip_tubesnip   # zero-downtime roll
+```
+`compose.yml` has `replicas: 2` + `update_config.order: start-first` — new tasks start
+before old ones stop, so a deploy never drops a client or a job.
+
+**Restart safety (built in, both modes):**
+- `jobs.json` (single-node) is written **atomically** (temp file + `os.replace`) — a crash mid-write never corrupts it.
+- Single-node: a job that was `running`/`queued` at restart is **re-queued automatically**.
+- Redis mode: every worker holds a **lease** (heartbeat via `update_job`); a job whose lease expires (node crashed) is **re-queued by the shared sweeper** — no job is ever stuck or lost.
+
+**Multi-node (Redis mode):** set `TUBESNIP_REDIS_URL` on every container → jobs/queue/lease/SSE are shared; a load balancer can route anywhere. For **cross-node downloads**, the result files must also be reachable from any node — mount shared storage at `TUBESNIP_SHARED_DIR` (NFS/EFS/S3). Without shared storage, downloads only work from the node that cut the file (use sticky sessions). A container that dies mid-cut has its job re-queued by another node's sweeper; cutting is idempotent, so nothing is lost. Rolling deploys: bring up the new version, drain old nodes, `SIGTERM` — abandoned jobs are re-claimed automatically.
+
 ## Notes
 
 - yt-dlp needs a JS runtime for full YouTube support; this project uses yt-dlp's
@@ -121,6 +172,10 @@ with a UI warning.
   larger chunk; prefer cutting short segments.
 - Result files & job directories are cleaned up automatically after TTL (env
   `TUBESNIP_JOB_TTL_H`, default 24 hours).
+- Video metadata (`/api/info`) is cached per video_id (1-day TTL) — repeated loads of
+  the same video skip the slow yt-dlp extract. Jobs with **identical params**
+  (url + start/end + resolution + mode + format) are deduplicated: a running/queued one
+  is followed, a finished one serves its cached result directly (no re-cut).
 - If YouTube blocks access, update yt-dlp: `uv run yt-dlp -U` (the nightly channel is
   recommended: `uv run yt-dlp --update-to nightly`).
 - Job progress uses **SSE** (`/api/jobs/{id}/events` + EventSource) — real-time push
@@ -129,6 +184,23 @@ with a UI warning.
 - Cut modes: **fast** (stream copy via a closed-Range proxy, fast; frame-accurate start
   via `accurate_seek` — no `-avoid_negative_ts make_zero`, which would force a keyframe
   snap) and **accurate** (frame-accurate re-encode down to the millisecond, slower).
+- Output **format**: `mp4` (default), `mov` (container remux — fast, H.264/AAC kept), or
+  `webm` (re-encode to VP9/Opus — slower; H.264/AAC can't live in a webm container).
+- Fast mode downloads video **and** audio in parallel (two ffmpeg processes) and uses a
+  4 MiB proxy window — halves the download wall-time vs. the old sequential 1 MiB path.
+- Jobs run **concurrently** in a small bounded pool (`TUBESNIP_CONCURRENCY`, default 2).
+  Set `1` for strictly serial processing. The cap is deliberate: each job already pulls
+  2 googlevideo streams, so a bigger pool can trip YouTube throttling and overload a
+  small VM — raise it only if the box has headroom.
+- **Hardware encoding (dynamic)**: when a GPU is exposed via `/dev/dri/renderD*` (Intel Arc /
+  AMD VA-API — e.g. PCI passthrough into a VM), the precise-mode H.264 re-encode uses
+  `h264_vaapi` and webm uses `av1_vaapi`/`vp9_vaapi` automatically. Detection is gated by a
+  0.5s test encode — a broken driver/encoder silently falls back to CPU. No `/dev/dri`
+  (e.g. QEMU's virtual VGA `1234:1111`) means CPU, exactly as before. GPU helps the
+  *encode* steps; it does **not** fix the YouTube download throttling below.
+- If a cut "stalls" at a low percent on a server, that's usually **YouTube throttling a
+  datacenter IP** (a bot-check would instead abort with an error message). Fix: logged-in
+  cookies via `TUBESNIP_COOKIES_FROM_BROWSER` or a residential proxy (see below).
 - yt-dlp is resolved with a PATH that favors the project's venv binary — Homebrew
   binaries (Python without curl_cffi) make all impersonate targets "unavailable" →
   videos get rejected.

@@ -1,5 +1,9 @@
 # Unit tests for pure logic in ytdlp_service (no network).
 # Run: uv run pytest
+import os
+import time
+from pathlib import Path
+
 import pytest
 
 from tubesnip import ytdlp_service as ys
@@ -42,6 +46,10 @@ class TestFriendlyError:
              "Failed to extract video data — yt-dlp may be outdated. Update: uv run yt-dlp -U"),
             ("ERROR: Sign in to confirm you're not a bot",
              "YouTube is blocking automated access (bot-check). Try again, or update yt-dlp: uv run yt-dlp -U"),
+            ("ERROR: could not find chrome cookies database in \"/root/.config/google-chrome\"",
+             "TUBESNIP_COOKIES_FROM_BROWSER points to a browser profile that doesn't exist here (no Chrome installed — common in containers). Export cookies.txt from your browser and use TUBESNIP_COOKIES instead."),
+            ("ERROR: could not find cookies database in firefox profile",
+             "Browser cookies unavailable (TUBESNIP_COOKIES_FROM_BROWSER). In a server/container, export cookies.txt and use TUBESNIP_COOKIES instead."),
             ("ERROR: x is not a valid URL", "Invalid YouTube URL."),
             # empty / unknown stderr → last line (fallback)
             ("", "An unknown error occurred."),
@@ -125,6 +133,33 @@ class TestCookieArgs:
         monkeypatch.setenv("TUBESNIP_COOKIES", "/tmp/c.txt")
         monkeypatch.setenv("TUBESNIP_COOKIES_FROM_BROWSER", "firefox")
         assert ys._cookie_args() == ["--cookies", "/tmp/c.txt", "--cookies-from-browser", "firefox"]
+
+    def test_writable_cookies_copies_readonly_source(self, monkeypatch, tmp_path):
+        """A read-only source (swarm config) is copied to the writable data dir
+        so yt-dlp's cookie-jar save-back doesn't hit EROFS."""
+        src = tmp_path / "cookies.txt"
+        src.write_text("# Netscape HTTP Cookie File\n")
+        src.chmod(0o400)
+        monkeypatch.setenv("TUBESNIP_DATA_DIR", str(tmp_path / "data"))
+        target = ys._writable_cookies(str(src))
+        assert target.endswith("cookies-cache.txt")
+        assert Path(target).read_text() == "# Netscape HTTP Cookie File\n"
+
+    def test_writable_cookies_reuses_fresh_cache(self, monkeypatch, tmp_path):
+        src = tmp_path / "cookies.txt"
+        src.write_text("newer")
+        data = tmp_path / "data"
+        data.mkdir()
+        cache = data / "cookies-cache.txt"
+        cache.write_text("cached")
+        old = time.time() - 1000
+        os.utime(src, (old, old))  # source older than cache → keep the cache
+        monkeypatch.setenv("TUBESNIP_DATA_DIR", str(data))
+        assert ys._writable_cookies(str(src)) == str(cache)
+        assert cache.read_text() == "cached"
+
+    def test_writable_cookies_missing_source_passthrough(self, tmp_path):
+        assert ys._writable_cookies(str(tmp_path / "none.txt")) == str(tmp_path / "none.txt")
 
 
 class TestNeedsFullFallback:

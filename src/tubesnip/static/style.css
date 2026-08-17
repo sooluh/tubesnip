@@ -304,7 +304,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding-right: 28px;
   /* prevent min-content (e.g. nowrap title) from widening the grid track */
   min-width: 0;
 }
