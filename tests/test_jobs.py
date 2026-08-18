@@ -182,6 +182,51 @@ class TestStore:
         jobs.update_job(jid, percent=None)
         assert jobs.get_job(jid)["percent"] is None
 
+    def test_update_job_records_stage_times(self):
+        """Per-step timing is persisted server-side so it survives reloads."""
+        jid = jobs.create_job(_payload())
+        t0 = jobs.get_job(jid)["created_at"]
+        jobs.update_job(jid, stage="extract")
+        jobs.update_job(jid, stage="download", percent=10)
+        jobs.update_job(jid, stage="verify", percent=97)
+        jobs.update_job(jid, status="done", stage="done", percent=100)
+        ssa = jobs.get_job(jid)["stage_started_at"]
+        assert ssa["extract"] >= t0
+        assert ssa["download"] >= ssa["extract"]
+        assert ssa["verify"] >= ssa["download"]
+        assert ssa["done"] >= ssa["verify"]
+        # Repeating the same stage must not overwrite the first start time.
+        jobs.update_job(jid, stage="download", percent=20)
+        assert jobs.get_job(jid)["stage_started_at"]["download"] == ssa["download"]
+
+    def test_create_job_stores_stage_estimates(self):
+        jid = jobs.create_job(_payload())
+        est = jobs.get_job(jid)["estimate_ms"]
+        assert est["extract"] == 2000
+        assert est["verify"] == 1000
+        assert est["convert"] == 0  # mp4 default
+        assert est["encode"] == 0  # fast default
+
+    def test_estimate_steps_webm_adds_convert_time(self):
+        p = _payload(
+            format="webm", start_ms=0, end_ms=10000,
+            hints={"bitrate_kbps": 5000, "fps": 30, "codec": "h264", "height": 1080},
+        )
+        est = jobs._estimate_steps(p)
+        assert est["download"] > 0
+        assert est["convert"] > 0  # vp9 re-encode takes time
+        # 10s @1080p30 at 80fps → 3.75s convert
+        assert est["convert"] == 3750
+        assert est["encode"] == 0  # fast mode
+
+    def test_estimate_steps_mov_av1_reencodes(self):
+        p = _payload(format="mov", start_ms=0, end_ms=10000, mode="accurate",
+                     hints={"bitrate_kbps": 5000, "fps": 30, "codec": "AV1", "height": 2160})
+        est = jobs._estimate_steps(p)
+        # 2160p → factor 4; accurate re-encode + AV1 mov re-encode both > 0.
+        assert est["encode"] > 0
+        assert est["convert"] > 0
+
     def test_update_job_missing_noop(self):
         jobs.update_job("missing", status="x")  # must not error
 
@@ -366,6 +411,7 @@ class TestProcess:
         assert job["title"] == "Title"
         assert job["actual_duration_ms"] == 4000
         assert job["snap_delta_ms"] == 0
+        assert job["file_size"] == 1  # real on-disk size of the result file
 
     def test_result_without_video(self, monkeypatch, tmp_path):
         jid = "j2"

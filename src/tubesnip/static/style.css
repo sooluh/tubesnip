@@ -230,7 +230,7 @@ body {
 }
 .btn-ghost:hover { background-color: var(--bg-soft); }
 
-.btn-process { width: 100%; padding: 15px; margin-top: 24px; font-size: 14px; }
+.btn-process { width: 100%; padding: 15px; font-size: 14px; }
 
 .btn-subtle {
   background-color: var(--bg-card);
@@ -302,6 +302,15 @@ body {
   border-bottom: 1px dotted currentColor;
 }
 .demo-hint a:hover { opacity: 0.8; }
+
+/* ---------- cut estimate (live, from user inputs) ---------- */
+.cut-estimate {
+  margin: auto 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+}
 
 /* ---------- loading skeleton (shimmer while /api/info fetches) ---------- */
 .shimmer {
@@ -829,6 +838,21 @@ body {
 .step-row.skip .step-badge { background-color: var(--bg-strong); color: var(--ink-faint); }
 
 .step-status-text { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; white-space: nowrap; }
+.step-right { display: inline-flex; align-items: center; gap: 12px; }
+.step-time {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  min-width: 96px;
+  text-align: right;
+}
+.step-elapsed { color: var(--ink-muted); }
+.step-est { color: var(--ink-faint); font-size: 11px; }
+.step-row.active .step-elapsed { color: var(--accent); }
 
 /* ---------- result card ---------- */
 .result-card {

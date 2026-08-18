@@ -179,6 +179,7 @@ def load() -> None:
     is a no-op: the store is shared and the sweeper does the recovery.
     """
     global _jobs
+    ytdlp_service.load_calibration()
     if REDIS_URL:
         return
     try:
@@ -222,6 +223,44 @@ def _save() -> None:
 _JOB_PARAM_KEYS = ("url", "start_ms", "end_ms", "resolution", "mode", "format")
 
 
+def _estimate_steps(payload: dict) -> dict:
+    """Per-stage estimates (ms) for the frontend pipeline, from cut params +
+    the effective stream's bitrate/fps/codec/height (sent as `hints` by the
+    frontend, which already fetched them from /api/info). Encode speeds come
+    from the server's real benchmark (encode_benchmark), so the estimate matches
+    the actual machine."""
+    dur_s = max(0, (payload.get("end_ms", 0) - payload.get("start_ms", 0))) / 1000
+    hints = payload.get("hints") or {}
+    bitrate = float(hints.get("bitrate_kbps") or 0)
+    fps = float(hints.get("fps") or 30)
+    codec = (hints.get("codec") or "h264").lower().replace(".", "")  # "H.264" -> "h264"
+    height = float(hints.get("height") or 1080)
+    factor = (height * (height * 16 / 9)) / (1080 * 1920)
+
+    bench = ytdlp_service.estimate_params()
+    x264_fps = bench["x264_fps"]
+    vp9_fps = bench["vp9_fps"]
+    throughput = bench["throughput_bps"]
+
+    extract = bench.get("extract_ms") or 2000
+    verify = bench.get("verify_ms") or 1000
+    download = int((dur_s * bitrate * 1000 / 8) / throughput * 1000) if bitrate > 0 else 0
+    encode = (
+        int(dur_s * fps * factor / x264_fps * 1000)
+        if payload.get("mode") == "accurate" else 0
+    )
+
+    fmt = payload.get("format") or "mp4"
+    if fmt == "webm":
+        convert = int(dur_s * fps * factor / vp9_fps * 1000)
+    elif fmt == "mov":
+        convert = 1000 if codec in ("h264", "hevc") else int(dur_s * fps * factor / x264_fps * 1000)
+    else:
+        convert = 0
+
+    return {"extract": extract, "download": download, "encode": encode, "convert": convert, "verify": verify}
+
+
 def _params_key(payload: dict) -> tuple:
     return (
         payload.get("url"),
@@ -247,6 +286,7 @@ def _new_job(job_id: str, payload: dict) -> dict:
         "actual_duration_ms": None,
         "snap_delta_ms": None,
         "created_at": time.time(),
+        "estimate_ms": _estimate_steps(payload),
         **payload,
     }
 
@@ -334,6 +374,22 @@ def get_job(job_id: str) -> dict | None:
         return dict(job) if job else None
 
 
+def _record_stage(fields: dict, job: dict) -> None:
+    """Record the start time of each pipeline stage on transition.
+
+    The frontend shows a per-step elapsed timer; that timer lives in the browser
+    and is lost on reload. Persisting the stage start times server-side means a
+    followed job (localStorage restore) and any node still get accurate per-step
+    durations. `done` is recorded too, so total processing time =
+    stage_started_at.done - created_at.
+    """
+    new_stage = fields.get("stage")
+    if new_stage and new_stage != job.get("stage"):
+        started = job.get("stage_started_at") or {}
+        started.setdefault(new_stage, time.time())
+        fields["stage_started_at"] = started
+
+
 def update_job(job_id: str, **fields) -> float | None:
     r = _r()
     if r is not None:
@@ -346,6 +402,7 @@ def update_job(job_id: str, **fields) -> float | None:
             cur_pct = job.get("percent")
             if isinstance(new_pct, (int, float)) and isinstance(cur_pct, (int, float)):
                 fields["percent"] = max(new_pct, cur_pct)
+            _record_stage(fields, job)
             job.update(fields)
             r.hset("tubesnip:jobs", job_id, json.dumps(job))
             # Heartbeat: keep the lease alive so the sweeper doesn't re-queue us.
@@ -370,6 +427,7 @@ def update_job(job_id: str, **fields) -> float | None:
         cur_pct = job.get("percent")
         if isinstance(new_pct, (int, float)) and isinstance(cur_pct, (int, float)):
             fields["percent"] = max(new_pct, cur_pct)
+        _record_stage(fields, job)
         job.update(fields)
         _save()
         snapshot = dict(job)
@@ -667,10 +725,19 @@ def _process(job_id: str) -> None:
         message="Done",
         download_url=f"/api/download/{job_id}",
         file=out_file.name,
+        file_size=out_file.stat().st_size if out_file.exists() else None,
         title=info.get("title"),
         actual_duration_ms=actual_duration_ms,
         snap_delta_ms=snap_delta_ms,
     )
+    # Feed this job's real stage durations back into the estimate parameters
+    # (internet throughput + encode fps) so future estimates match reality.
+    try:
+        _done = get_job(job_id)
+        if _done:
+            ytdlp_service.update_calibration(_done)
+    except Exception:
+        logger.exception("calibration update failed")
     logger.info(
         "job %s done: duration=%.2fs (requested %.2fs, snap %.2fs) file=%s",
         job_id, actual_duration_ms / 1000, requested_ms / 1000,

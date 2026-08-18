@@ -230,6 +230,7 @@
             <i class="fa-solid fa-scissors" aria-hidden="true"></i>
             <span>Start Trimming Video</span>
           </button>
+          <p id="cut-estimate" class="cut-estimate hidden"></p>
         </div>
 
       </div>
@@ -267,7 +268,12 @@
             <span class="step-badge">1</span>
             <span>Gathering Info &amp; Extracting Metadata</span>
           </div>
-          <span class="step-status-text">Waiting…</span>
+          <span class="step-right">
+            <span class="step-time">
+              <span class="step-elapsed"></span>
+              <span class="step-est"></span>
+            </span>
+          </span>
         </div>
 
         <div class="step-row" id="step-2">
@@ -275,7 +281,12 @@
             <span class="step-badge">2</span>
             <span>Downloading &amp; Cutting Video + Audio</span>
           </div>
-          <span class="step-status-text">Waiting…</span>
+          <span class="step-right">
+            <span class="step-time">
+              <span class="step-elapsed"></span>
+              <span class="step-est"></span>
+            </span>
+          </span>
         </div>
 
         <div class="step-row" id="step-3">
@@ -283,7 +294,12 @@
             <span class="step-badge">3</span>
             <span>Precise Re-encode (precise mode only)</span>
           </div>
-          <span class="step-status-text">Waiting…</span>
+          <span class="step-right">
+            <span class="step-time">
+              <span class="step-elapsed"></span>
+              <span class="step-est"></span>
+            </span>
+          </span>
         </div>
 
         <div class="step-row" id="step-4">
@@ -291,7 +307,12 @@
             <span class="step-badge">4</span>
             <span>Format Conversion (MOV / WebM)</span>
           </div>
-          <span class="step-status-text">Waiting…</span>
+          <span class="step-right">
+            <span class="step-time">
+              <span class="step-elapsed"></span>
+              <span class="step-est"></span>
+            </span>
+          </span>
         </div>
 
         <div class="step-row" id="step-5">
@@ -299,7 +320,12 @@
             <span class="step-badge">5</span>
             <span>Verifying Result</span>
           </div>
-          <span class="step-status-text">Waiting…</span>
+          <span class="step-right">
+            <span class="step-time">
+              <span class="step-elapsed"></span>
+              <span class="step-est"></span>
+            </span>
+          </span>
         </div>
       </div>
 
@@ -316,7 +342,9 @@
               <span class="dot-sep" aria-hidden="true">•</span>
               <span>Duration: <strong id="dur-result-badge">–</strong></span>
               <span class="dot-sep" aria-hidden="true">•</span>
-              <span>Est. Size: <strong id="size-result-badge">–</strong></span>
+              <span>Size: <strong id="size-result-badge">–</strong></span>
+              <span class="dot-sep" aria-hidden="true">•</span>
+              <span>Elapsed: <strong id="time-result-badge">–</strong></span>
             </div>
             <p id="download-meta" class="download-meta"></p>
           </div>

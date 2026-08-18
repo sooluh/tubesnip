@@ -1,11 +1,13 @@
 # Tests for the ytdlp_service.py pipeline (subprocess/requests mocked, no network).
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from tubesnip import ytdlp_service as ys
+from tubesnip import jobs
 
 
 class _Proc:
@@ -196,6 +198,26 @@ class TestGetVideoInfo:
         ys.get_video_info("https://youtu.be/vid123")
         ys.get_video_info("https://youtu.be/vid123")
         assert calls["n"] == 2  # TTL expired → re-extracted
+
+    def test_estimate_params_are_fresh_not_cached(self, monkeypatch):
+        """The info cache stores video metadata only — estimate_params always
+        reflect the latest calibration (a slow server → lower throughput)."""
+        info = {"id": "vid123", "title": "T", "duration": 12.5, "is_live": False, "formats": []}
+
+        class S:
+            def run(self, args, **kw):
+                return _Proc(0, json.dumps(info))
+
+            def Popen(self, cmd, **kw):
+                raise AssertionError("Popen not expected")
+
+        monkeypatch.setattr(ys, "subprocess", S())
+        r1 = ys.get_video_info("https://youtu.be/vid123")
+        assert r1["estimate_params"]["throughput_bps"] == 6_000_000  # baseline
+        # Calibrate from a completed job: server is actually slow.
+        ys._calibration = {"throughput_bps": 100_000}
+        r2 = ys.get_video_info("https://youtu.be/vid123")  # cache HIT
+        assert r2["estimate_params"]["throughput_bps"] == 100_000  # fresh, not stale
 
 
 class TestRunStreaming:
@@ -1212,7 +1234,67 @@ class TestConvertFormat:
         assert src.exists()  # source kept on failure
 
 
-class TestVaapiBest:
+class TestCalibration:
+    """Adaptive estimates: completed jobs feed real throughput/encode speeds
+    back so the next estimate matches the server's actual behavior."""
+
+    def _job(self, **over):
+        t0 = time.time()
+        return {
+            "start_ms": 0, "end_ms": 52000, "mode": "fast", "format": "webm",
+            "hints": {"bitrate_kbps": 5000, "fps": 30, "codec": "h264", "height": 1080},
+            "stage_started_at": {
+                "extract": t0,
+                "download": t0 + 2,
+                "convert": t0 + 30,
+                "verify": t0 + 55,
+                "done": t0 + 56,
+            },
+            **over,
+        }
+
+    def test_measures_throughput_and_encode_fps(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(ys, "_CAL_FILE", tmp_path / "cal.json")
+        ys.update_calibration(self._job())
+        cal = ys._calibration
+        # 52s × 5000kbps = 32.5MB in 28s → ~1.16 MB/s
+        assert 1_000_000 < cal["throughput_bps"] < 1_400_000
+        # 1560 frames in 25s → ~62 fps
+        assert 50 < cal["vp9_fps"] < 80
+        # extract 2s, verify 1s overheads measured too
+        assert cal["extract_ms"] == 2000
+        assert cal["verify_ms"] == 1000
+        assert (tmp_path / "cal.json").exists()  # persisted
+
+    def test_remux_convert_not_counted_as_encode(self, monkeypatch, tmp_path):
+        """mov + H.264 = remux → the convert leg must not distort encode fps."""
+        monkeypatch.setattr(ys, "_CAL_FILE", tmp_path / "cal.json")
+        job = self._job(format="mov", hints={"bitrate_kbps": 5000, "fps": 30, "codec": "H.264", "height": 1080})
+        ys.update_calibration(job)
+        # "H.264" (with the dot) must be recognized as mov-safe — neither vp9
+        # nor x264 fps may be polluted by the remux leg.
+        assert "vp9_fps" not in ys._calibration
+        assert "x264_fps" not in ys._calibration
+        assert ys.estimate_params()["vp9_fps"] == 80.0  # baseline default kept
+        # and _estimate_steps treats it as a cheap remux (1s), not a re-encode
+        est = jobs._estimate_steps(job)
+        assert est["convert"] == 1000
+
+    def test_ema_adjusts_toward_reality(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(ys, "_CAL_FILE", tmp_path / "cal.json")
+        # first job: slow (calibrates down)
+        ys.update_calibration(self._job())
+        slow = ys.estimate_params()["throughput_bps"]
+        # second job: much faster → EMA pulls it up but not all the way
+        t0 = time.time()
+        fast = self._job()
+        fast["stage_started_at"] = {
+            "extract": t0, "download": t0 + 2, "convert": t0 + 6,
+            "verify": t0 + 31, "done": t0 + 32,
+        }
+        ys.update_calibration(fast)
+        assert ys.estimate_params()["throughput_bps"] > slow
+        assert ys.estimate_params()["throughput_bps"] < 32_500_000 / 4  # not a full jump
     def _clear(self):
         ys._vaapi_best.cache_clear()
 

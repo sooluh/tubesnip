@@ -4,6 +4,9 @@ import { msToTime, timeToMs, constrainStart, constrainEnd } from "./time.js";
 
 const $ = (id) => document.getElementById(id);
 
+// TubeSnip is a long-video clipper: cap each trim at 5 minutes.
+const MAX_TRIM_MS = 5 * 60 * 1000;
+
 const els = {
   urlInput: $("url-input"),
   loadBtn: $("load-btn"),
@@ -26,6 +29,7 @@ const els = {
   sliderRangeInfo: $("slider-range-info"),
   resStack: $("res-stack"),
   fmtStack: $("fmt-stack"),
+  cutEstimate: $("cut-estimate"),
   modeOptions: $("mode-options"),
   cutBtn: $("cut-btn"),
   processingCard: $("processing-card"),
@@ -43,6 +47,7 @@ const els = {
   resResultBadge: $("res-result-badge"),
   durResultBadge: $("dur-result-badge"),
   sizeResultBadge: $("size-result-badge"),
+  timeResultBadge: $("time-result-badge"),
   noAudioWarn: $("no-audio-warn"),
   jobDialog: $("job-dialog"),
   jobDialogText: $("job-dialog-text"),
@@ -50,7 +55,7 @@ const els = {
   jobDiscard: $("job-discard"),
 };
 
-const state = { durationMs: 0, videoId: null, hasAudio: true, selectedRes: "best", selectedFmt: "mp4" };
+const state = { durationMs: 0, videoId: null, hasAudio: true, selectedRes: "best", selectedFmt: "mp4", estimateParams: null };
 
 /* ---------------- util ---------------- */
 
@@ -83,6 +88,7 @@ function resetToInitial() {
   state.hasAudio = true;
   state.selectedRes = "best";
   state.selectedFmt = "mp4";
+  state.estimateParams = null;
 
   els.title.textContent = "";
   els.title.title = "";
@@ -117,6 +123,8 @@ function resetToInitial() {
   els.resResultBadge.textContent = "–";
   els.durResultBadge.textContent = "–";
   els.sizeResultBadge.textContent = "–";
+  els.timeResultBadge.textContent = "–";
+  jobStartTime = null;
   pipelineFmt = "mp4";
   resetPipeline();
 
@@ -182,6 +190,7 @@ function syncFromSliders(which) {
   els.startSlider.value = String(s);
   els.endSlider.value = String(e);
   renderTime();
+  renderEstimate();
   if (which) onTimeAdjusted();
 }
 
@@ -191,6 +200,7 @@ function syncFromStartInput() {
   const clamped = constrainStart(v, endMs(), state.durationMs);
   els.startSlider.value = String(clamped);
   renderTime();
+  renderEstimate();
   onTimeAdjusted();
 }
 
@@ -200,6 +210,7 @@ function syncFromEndInput() {
   const clamped = constrainEnd(v, startMs(), state.durationMs);
   els.endSlider.value = String(clamped);
   renderTime();
+  renderEstimate();
   onTimeAdjusted();
 }
 
@@ -390,6 +401,7 @@ function applyInfo(data) {
   state.durationMs = data.duration_ms;
   state.videoId = data.video_id;
   state.hasAudio = data.has_audio;
+  state.estimateParams = data.estimate_params || null;
 
   els.title.textContent = data.title || data.video_id;
   els.title.title = data.title || "";
@@ -408,12 +420,15 @@ function applyInfo(data) {
 
   // Resolution stack: "Best (auto)" + the resolutions available for this video.
   els.resStack.innerHTML = "";
-  const addResBtn = (value, label, sub, bitrate) => {
+  const addResBtn = (value, label, fps, codec, bitrate) => {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "res-btn";
     b.dataset.value = value;
+    b.dataset.fps = String(fps ?? 30);
+    b.dataset.codec = codec || "";
     b.dataset.bitrate = bitrate != null ? String(bitrate) : ""; // kbps
+    const sub = codec ? `${fps}fps · ${codec}` : "";
     b.innerHTML =
       `<span class="res-btn-left"><span class="res-dot"></span><span>${label}</span></span>` +
       (sub ? `<span class="res-pixel">${sub}</span>` : "");
@@ -423,15 +438,17 @@ function applyInfo(data) {
       }
       b.classList.add("active");
       state.selectedRes = value;
+      renderEstimate();
     });
     els.resStack.appendChild(b);
   };
-  addResBtn("best", "Best (auto)", "auto");
+  addResBtn("best", "Best (auto)", null, null, null);
   for (const r of data.resolutions) {
-    addResBtn(String(r.height), `${r.height}p`, `${r.fps}fps · ${r.codec}`, r.bitrate);
+    addResBtn(String(r.height), `${r.height}p`, r.fps, r.codec, r.bitrate);
   }
   els.resStack.querySelector('.res-btn[data-value="best"]').classList.add("active");
   state.selectedRes = "best";
+  renderEstimate();
 
   if (data.has_audio) {
     els.noAudioWarn.classList.add("hidden");
@@ -458,11 +475,138 @@ const CONVERT_STEP = 3; // step-4: format conversion — only when output != mp4
 const seenStages = new Set();
 let pipelineMode = null; // current job mode: "fast" / "accurate" (null = unknown yet)
 let pipelineFmt = "mp4"; // current job output format (drives convert-step visibility)
+// Per-step elapsed timers: stage -> { start, running }. Ticks while a step is
+// active; freezes to the real duration once it's done.
+const stepTimers = {};
+const stagePct = {}; // stage -> latest display percent
+const stageEstimate = {}; // stage -> backend-estimated ms (from job.estimate_ms)
+let stepTickId = null;
+let jobStartTime = null; // Date.now() when the user pressed Cut & Download
 
-function setStepStatus(i, cls, text) {
+// Display-percent range per pipeline stage → used to estimate time remaining
+// while a step runs (elapsed / progress-rate). Indeterminate stages have an
+// empty range (no estimate, just elapsed).
+const STAGE_RANGE = {
+  extract: [],
+  download: [5, 80],
+  encode: [80, 95],
+  convert: [80, 95],
+   verify: [],
+};
+
+function startStepTick() {
+  if (stepTickId != null) return;
+  stepTickId = setInterval(renderStepTimers, 100);
+}
+
+function stopStepTick() {
+  if (stepTickId != null) {
+    clearInterval(stepTickId);
+    stepTickId = null;
+  }
+}
+
+/** Estimate remaining ms from elapsed + display percent within a stage range.
+ * `range` is [min, max] display percent; null when there's no progress yet, the
+ * stage is indeterminate, or the estimate is meaningless. The last case matters:
+ * ffmpeg's out_time reaches the end while muxing still runs, so the display %
+ * saturates at the range max before the step truly finishes — a "~0.000 left"
+ * while still processing is misleading, so we drop it. */
+export function timeLeft(elapsed, pct, range) {
+  if (range.length !== 2 || pct == null || pct <= range[0] || range[1] <= range[0]) {
+    return null;
+  }
+  const prog = (pct - range[0]) / (range[1] - range[0]);
+  const remaining = (elapsed / prog) * (1 - prog);
+  if (remaining < 500) return null;
+  return remaining;
+}
+
+/** Set a step's two-line time display: elapsed (top) + estimate (bottom). */
+function setStepTime(i, elapsedText, estText) {
+  const tEl = $(PIPELINE_STEPS[i].id).querySelector(".step-time");
+  const el = tEl && tEl.querySelector(".step-elapsed");
+  const es = tEl && tEl.querySelector(".step-est");
+  if (el) el.textContent = elapsedText || "";
+  if (es) es.textContent = estText || "";
+}
+
+/** Round a remaining estimate to whole seconds — keeps it from jittering. */
+function roundedRemaining(ms) {
+  if (ms == null || ms < 500) return null;
+  return Math.max(0, Math.round(ms / 1000) * 1000);
+}
+
+/** Show per-step time spans. Active steps: elapsed (top) + ~remaining (bottom),
+ * from the backend estimate when available, else the progress rate. Waiting
+ * steps: the backend estimate so it's visible from the start. */
+function renderStepTimers() {
+  for (let i = 0; i < PIPELINE_STEPS.length; i++) {
+    const stage = PIPELINE_STEPS[i].stage;
+    const t = stepTimers[stage];
+    if (t && t.running) {
+      const elapsed = performance.now() - t.start;
+      let remaining = null;
+      const est = stageEstimate[stage];
+      if (est != null && est > 0 && elapsed < est) {
+        remaining = est - elapsed;
+      } else {
+        // Static estimate exhausted/zero (throttling, heuristic too low) →
+        // fall back to the adaptive progress-rate estimate.
+        remaining = timeLeft(elapsed, stagePct[stage], STAGE_RANGE[stage]);
+      }
+      const rem = roundedRemaining(remaining);
+      setStepTime(
+        i,
+        msToTime(elapsed),
+        rem != null ? `~${msToTime(rem)} left` : "",
+      );
+    } else if (!t && stageEstimate[stage] != null && stageEstimate[stage] > 0) {
+      setStepTime(i, "", `~${msToTime(stageEstimate[stage])}`);
+    }
+  }
+}
+
+/** Store the backend-computed per-stage estimates and render them immediately
+ * (the job's first SSE snapshot carries estimate_ms, so the pipeline shows
+ * estimates as soon as the job is submitted). */
+function applyStepEstimates(job) {
+  const est = job && job.estimate_ms;
+  if (!est) return;
+  for (const s of PIPELINE_STEPS) {
+    if (est[s.stage] != null) stageEstimate[s.stage] = est[s.stage];
+  }
+  renderStepTimers();
+}
+
+function setStepStatus(i, cls) {
   const el = $(PIPELINE_STEPS[i].id);
   el.className = cls ? `step-row ${cls}` : "step-row";
-  el.querySelector(".step-status-text").textContent = text;
+  // Status is conveyed by the row's text color (.active / .done / .skip) —
+  // no separate status text.
+  const stage = PIPELINE_STEPS[i].stage;
+  if (cls === "active") {
+    const t = stepTimers[stage] || { start: performance.now(), running: true };
+    if (t.start == null) t.start = performance.now();
+    t.running = true;
+    stepTimers[stage] = t;
+    startStepTick();
+  } else if (cls === "done") {
+    const t = stepTimers[stage];
+    if (t && t.running) {
+      t.running = false;
+      setStepTime(i, msToTime(performance.now() - t.start), "");
+    }
+  } else {
+    delete stepTimers[stage];
+    setStepTime(
+      i,
+      "",
+      stageEstimate[stage] != null && stageEstimate[stage] > 0
+        ? `~${msToTime(stageEstimate[stage])}`
+        : "",
+    );
+  }
   // Re-encode only exists in precise mode — hide the step in other modes.
   if (i === ENCODE_STEP) {
     el.classList.toggle("hidden", pipelineMode !== "accurate");
@@ -475,8 +619,12 @@ function setStepStatus(i, cls, text) {
 
 function resetPipeline() {
   seenStages.clear();
+  for (const k of Object.keys(stepTimers)) delete stepTimers[k];
+  for (const k of Object.keys(stagePct)) delete stagePct[k];
+  for (const k of Object.keys(stageEstimate)) delete stageEstimate[k];
+  stopStepTick();
   for (let i = 0; i < PIPELINE_STEPS.length; i++) {
-    setStepStatus(i, "", "Waiting…");
+    setStepStatus(i, "");
   }
 }
 
@@ -488,11 +636,11 @@ function updatePipeline(stage) {
   for (let j = 0; j < PIPELINE_STEPS.length; j++) {
     if (j < i) {
       const skipped = !seenStages.has(PIPELINE_STEPS[j].stage);
-      setStepStatus(j, skipped ? "skip" : "done", skipped ? "Skipped" : "Done ✓");
+      setStepStatus(j, skipped ? "skip" : "done");
     } else if (j === i) {
-      setStepStatus(j, "active", "Processing…");
+      setStepStatus(j, "active");
     } else {
-      setStepStatus(j, "", "Waiting…");
+      setStepStatus(j, "");
     }
   }
 }
@@ -500,11 +648,11 @@ function updatePipeline(stage) {
 function finishPipeline() {
   for (let j = 0; j < PIPELINE_STEPS.length; j++) {
     if (seenStages.has(PIPELINE_STEPS[j].stage)) {
-      setStepStatus(j, "done", "Done ✓");
+      setStepStatus(j, "done");
     } else if (!$(PIPELINE_STEPS[j].id).classList.contains("hidden")) {
       // A reused (cached) job arrives already "done" — no stage events were
       // streamed, so mark every applicable (visible) step done too.
-      setStepStatus(j, "done", "Done ✓");
+      setStepStatus(j, "done");
     }
   }
 }
@@ -550,6 +698,7 @@ function showProgress(message, percent, stage) {
     els.progressFill.style.width = Math.min(100, Math.max(0, percent)) + "%";
     els.processPercent.textContent = `${Math.min(100, Math.floor(percent))}%`;
   }
+  if (stage) stagePct[stage] = percent; // for per-step time-remaining estimates
 }
 
 function hideProgress() {
@@ -601,16 +750,26 @@ function showDownload(job) {
   els.resResultBadge.textContent = resLabel;
   els.durResultBadge.textContent =
     job.actual_duration_ms != null ? msToTime(job.actual_duration_ms) : "–";
-  // Est. size from bitrate: duration × bitrate(kbps) × 1000 / 8.
+  // Est. size from bitrate: duration × bitrate(kbps) × 1000 / 8 — only as a
+  // fallback for old jobs; the server now sends the real file size.
   let durMs = job.actual_duration_ms;
   if (durMs == null && state.durationMs > 0) durMs = endMs() - startMs();
   const bitrate = bitrateForRes(job.resolution);
   els.sizeResultBadge.textContent =
-    durMs != null && bitrate ? formatSize((durMs / 1000) * bitrate * 1000 / 8) : "–";
+    job.file_size != null
+      ? formatSize(job.file_size)
+      : durMs != null && bitrate
+        ? formatSize((durMs / 1000) * bitrate * 1000 / 8)
+        : "–";
+  // Total elapsed: server truth (created_at → done). Survives reload / follow /
+  // multi-node; falls back to the frontend click time for older jobs.
+  const ssa = job.stage_started_at || {};
+  const createdMs = job.created_at != null ? job.created_at * 1000 : jobStartTime;
+  const doneMs = ssa.done != null ? ssa.done * 1000 : Date.now();
+  els.timeResultBadge.textContent =
+    createdMs != null ? msToTime(Math.max(0, doneMs - createdMs)) : "–";
+  applyStepDurations(job);
   const parts = [];
-  if (job.actual_duration_ms != null) {
-    parts.push(`Result length: ${msToTime(job.actual_duration_ms)}`);
-  }
   if (job.snap_delta_ms != null && job.snap_delta_ms > 300) {
     // Fast is frame-accurate (accurate_seek) — this warning only shows when
     // the result deviates from the request (anomaly).
@@ -621,6 +780,46 @@ function showDownload(job) {
   els.downloadMeta.textContent = parts.join(" · ");
   els.downloadLink.scrollIntoView({ behavior: "smooth", block: "center" });
   finishProcessingCard();
+}
+
+/** Fill per-step durations from backend stage timestamps. The live step timer
+ * lives in the browser (lost on reload); these server timestamps are the
+ * source of truth and also cover a followed/cached job. */
+function applyStepDurations(job) {
+  const ssa = job.stage_started_at;
+  if (!ssa) return;
+  const order = PIPELINE_STEPS.map((s) => s.stage).concat("done");
+  for (let i = 0; i < PIPELINE_STEPS.length; i++) {
+    const st = PIPELINE_STEPS[i].stage;
+    if (ssa[st] == null) continue;
+    let end = null;
+    for (let j = i + 1; j < order.length; j++) {
+      if (ssa[order[j]] != null) {
+        end = ssa[order[j]];
+        break;
+      }
+    }
+    if (end == null) end = job.created_at != null ? Date.now() / 1000 : null;
+    if (end != null) {
+      setStepTime(i, msToTime(Math.max(0, (end - ssa[st]) * 1000)), "");
+    }
+  }
+}
+
+/** Re-fetch the server's latest calibrated estimate params (after a job
+ * completes the calibration may have changed — e.g. a slower-than-expected
+ * download) and re-render the pre-cut estimate. */
+async function refreshEstimateParams() {
+  try {
+    const res = await fetch("/api/health");
+    const data = await res.json();
+    if (data.estimate_params) {
+      state.estimateParams = data.estimate_params;
+      renderEstimate();
+    }
+  } catch {
+    /* offline — keep the current params */
+  }
 }
 
 /** Actual mode: "auto" resolves to fast/accurate (fast preferred). */
@@ -641,6 +840,76 @@ function syncTrimCardActive() {
     card.classList.toggle("active", radio === checked);
   }
 }
+/* ---------------- live cut-time estimate (heuristic, from user inputs) ---------------- */
+
+// Encode-speed / throughput defaults, used until /api/info delivers the
+// server's real benchmark (estimate_params). The server measures its actual
+// x264/vp9 encode speed at first use and sends it back — estimates then match
+// the machine instead of hardcoded guesses.
+const ESTIMATE_DEFAULTS = { x264_fps: 200, vp9_fps: 80, throughput_bps: 6_000_000 };
+
+function estimateParams() {
+  return state.estimateParams || ESTIMATE_DEFAULTS;
+}
+
+/** Effective resolution button for the current selection (best → highest bitrate). */
+function effectiveResButton() {
+  if (state.selectedRes !== "best") {
+    return els.resStack.querySelector(`.res-btn[data-value="${state.selectedRes}"]`);
+  }
+  let maxB = 0;
+  let btn = null;
+  for (const b of els.resStack.querySelectorAll(".res-btn")) {
+    const bv = parseFloat(b.dataset.bitrate || "");
+    if (isFinite(bv) && bv > maxB) {
+      maxB = bv;
+      btn = b;
+    }
+  }
+  return btn;
+}
+
+/** Rough expected processing seconds for the current inputs, or null. */
+export function estimateSeconds() {
+  const durS = (endMs() - startMs()) / 1000;
+  if (!(durS > 0) || state.durationMs <= 0) return null;
+  const btn = effectiveResButton();
+  const bitrate = btn ? parseFloat(btn.dataset.bitrate || "") || 0 : 0;
+  const fps = btn ? parseFloat(btn.dataset.fps || "30") || 30 : 30;
+  const codec = btn ? (btn.dataset.codec || "h264") : "h264";
+  const height = btn ? parseInt(btn.dataset.value, 10) : 1080;
+  const factor = (height * (height * 16 / 9)) / (1080 * 1920);
+  const p = estimateParams();
+  const extractS = (p.extract_ms || 2000) / 1000;
+  const verifyS = (p.verify_ms || 1000) / 1000;
+  const downloadS = bitrate > 0 ? (durS * bitrate * 1000 / 8) / p.throughput_bps : 0;
+
+  let encodeS = 0;
+  if (currentMode() === "accurate") encodeS = (durS * fps * factor) / p.x264_fps;
+
+  let convertS = 0;
+  const fmt = state.selectedFmt;
+  if (fmt === "webm") {
+    convertS = (durS * fps * factor) / p.vp9_fps;
+  } else if (fmt === "mov") {
+    const movSafe = codec === "H.264" || codec === "HEVC";
+    convertS = movSafe ? 1 : (durS * fps * factor) / p.x264_fps;
+  }
+
+  return extractS + downloadS + encodeS + convertS + verifyS;
+}
+
+/** Show "≈ HH:MM:SS.mmm" under the Cut button; hidden when no video is loaded. */
+export function renderEstimate() {
+  const s = estimateSeconds();
+  if (s == null) {
+    els.cutEstimate.classList.add("hidden");
+    els.cutEstimate.textContent = "";
+    return;
+  }
+  els.cutEstimate.textContent = `≈ ${msToTime(s * 1000)} (estimate)`;
+  els.cutEstimate.classList.remove("hidden");
+}
 
 async function startCut() {
   const url = els.urlInput.value.trim();
@@ -650,8 +919,13 @@ async function startCut() {
     showError("Invalid time format. Example: 00:01:23.456");
     return;
   }
+  if (endMs - startMs > MAX_TRIM_MS) {
+    showError(`Trim is limited to 5 minutes (got ${msToTime(endMs - startMs)}).`);
+    return;
+  }
   hideError();
   const mode = currentMode();
+  jobStartTime = Date.now();
   showProcessingCard(mode, state.selectedFmt);
   hideProgress();
   els.downloadArea.classList.add("hidden");
@@ -660,6 +934,7 @@ async function startCut() {
   showProgress("Submitting job…", 0);
 
   try {
+    const resBtn = effectiveResButton();
     const res = await fetch("/api/cut", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -670,6 +945,16 @@ async function startCut() {
         resolution: state.selectedRes,
         mode,
         format: state.selectedFmt,
+        // Hint the backend with the effective stream so it can estimate each
+        // pipeline stage's duration (the same data the pre-cut estimate uses).
+        hints: resBtn
+          ? {
+              bitrate_kbps: parseFloat(resBtn.dataset.bitrate || "") || 0,
+              fps: parseFloat(resBtn.dataset.fps || "30") || 30,
+              codec: resBtn.dataset.codec || "h264",
+              height: parseInt(resBtn.dataset.value, 10) || 1080,
+            }
+          : null,
       }),
     });
     const data = await res.json();
@@ -698,6 +983,7 @@ function pollJob(jobId) {
           hideProgress();
           showDownload(job);
           finishCutUi();
+          refreshEstimateParams(); // re-calibrate for the next cut
           return;
         }
         if (job.status === "error") {
@@ -706,6 +992,7 @@ function pollJob(jobId) {
           showError(job.error || "An error occurred.");
           return;
         }
+        applyStepEstimates(job); // show per-step estimates right away
         showProgress(job.message || job.stage, job.percent, job.stage);
       };
       es.onerror = () => {
@@ -729,6 +1016,7 @@ async function pollJobPolling(jobId) {
       hideProgress();
       showDownload(job);
       finishCutUi();
+      refreshEstimateParams(); // re-calibrate for the next cut
       return;
     }
     if (job.status === "error") {
@@ -736,6 +1024,7 @@ async function pollJobPolling(jobId) {
       showError(job.error || "An error occurred.");
       return;
     }
+    applyStepEstimates(job); // show per-step estimates right away
     showProgress(job.message || job.stage, job.percent, job.stage);
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -896,6 +1185,7 @@ async function restoreJob() {
       // options) from the job data, then start following.
       els.playerSection.classList.remove("hidden");
       showProcessingCard(job.mode, job.format || "mp4");
+      jobStartTime = Date.now();
       if (job.url) {
         els.urlInput.value = job.url;
         loadVideoUrl(job.url, job).then((ok) => {
@@ -944,6 +1234,7 @@ for (const b of els.fmtStack.querySelectorAll(".res-btn")) {
     }
     b.classList.add("active");
     state.selectedFmt = b.dataset.format;
+    renderEstimate();
   });
 }
 
@@ -956,12 +1247,16 @@ for (const card of document.querySelectorAll(".trim-card")) {
     if (radio) {
       radio.checked = true;
       syncTrimCardActive();
+      renderEstimate();
     }
   });
 }
 // Radio changes via keyboard/other JS → stay in sync.
 for (const r of document.querySelectorAll('input[name="mode"]')) {
-  r.addEventListener("change", syncTrimCardActive);
+  r.addEventListener("change", () => {
+    syncTrimCardActive();
+    renderEstimate();
+  });
 }
 syncTrimCardActive();
 
@@ -982,10 +1277,16 @@ export function __resetStateForTest() {
   state.hasAudio = true;
   state.selectedRes = "best";
   state.selectedFmt = "mp4";
+  state.estimateParams = null;
   seenStages.clear();
   pipelineFmt = "mp4";
+  jobStartTime = null;
+  for (const k of Object.keys(stepTimers)) delete stepTimers[k];
+  for (const k of Object.keys(stagePct)) delete stagePct[k];
+  for (const k of Object.keys(stageEstimate)) delete stageEstimate[k];
+  stopStepTick();
   for (let i = 0; i < PIPELINE_STEPS.length; i++) {
-    setStepStatus(i, "", "Waiting…");
+    setStepStatus(i, "");
   }
   destroyPlyr();
 }

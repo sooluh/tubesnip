@@ -27,12 +27,20 @@ def _info_ok(**over):
 class TestApiHealth:
     def test_ok_single_node(self, client, monkeypatch):
         monkeypatch.setattr(app_module.jobs, "_r", lambda: None)
+        monkeypatch.setattr(
+            app_module.ytdlp_service, "estimate_params",
+            lambda: {"x264_fps": 200.0, "vp9_fps": 80.0, "throughput_bps": 6_000_000},
+        )
         r = client.get("/api/health")
         assert r.status_code == 200
-        assert r.json() == {"ok": True, "redis": False}
+        body = r.json()
+        assert body["ok"] is True
+        assert body["redis"] is False
+        assert body["estimate_params"]["throughput_bps"] == 6_000_000
 
     def test_ok_redis_connected(self, client, monkeypatch):
         monkeypatch.setattr(app_module.jobs, "_r", lambda: object())
+        monkeypatch.setattr(app_module.ytdlp_service, "estimate_params", lambda: {})
         r = client.get("/api/health")
         assert r.status_code == 200
         assert r.json()["redis"] is True
@@ -144,6 +152,28 @@ class TestApiCut:
         )
         assert r.status_code == 400
         assert "range 144-4320" in r.json()["detail"]
+
+    def test_trim_length_capped_at_five_minutes(self, client, monkeypatch):
+        monkeypatch.setattr(app_module.ytdlp_service, "extract_video_id", lambda url: "abc123")
+        r = client.post(
+            "/api/cut",
+            json={"url": "https://youtu.be/abc123", "start_ms": 0, "end_ms": 300001},
+        )
+        assert r.status_code == 400
+        assert "5 minutes" in r.json()["detail"]
+
+    def test_trim_length_exactly_five_minutes_allowed(self, client, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            app_module.jobs, "create_job",
+            lambda payload: captured.update(payload=payload) or "job12345",
+        )
+        monkeypatch.setattr(app_module.ytdlp_service, "extract_video_id", lambda url: "abc123")
+        r = client.post(
+            "/api/cut",
+            json={"url": "https://youtu.be/abc123", "start_ms": 0, "end_ms": 300000},
+        )
+        assert r.status_code == 200
 
 
 class TestApiJob:

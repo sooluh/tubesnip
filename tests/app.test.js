@@ -64,6 +64,7 @@ function resetDom() {
   byId("slider-fill").style.width = "0%";
   byId("slider-range-info").textContent = "00:00:00.000 → 00:00:00.000";
   byId("res-stack").innerHTML = "";
+  add("cut-estimate", "hidden");
   for (const b of byId("fmt-stack").querySelectorAll(".res-btn")) {
     b.classList.toggle("active", b.dataset.format === "mp4");
   }
@@ -78,7 +79,6 @@ function resetDom() {
   byId("progress-stage").textContent = "";
   for (const id of ["step-1", "step-2", "step-3", "step-4", "step-5"]) {
     byId(id).className = "step-row";
-    byId(id).querySelector(".step-status-text").textContent = "Waiting…";
   }
   add("progress-area", "hidden");
   byId("progress-fill").classList.remove("indeterminate");
@@ -92,6 +92,7 @@ function resetDom() {
   byId("res-result-badge").textContent = "–";
   byId("dur-result-badge").textContent = "–";
   byId("size-result-badge").textContent = "–";
+  byId("time-result-badge").textContent = "–";
   byId("load-btn").disabled = false;
   byId("load-btn").textContent = "Load Video";
   add("mode-options", "hidden");
@@ -1023,6 +1024,17 @@ describe("startCut (cut & download)", () => {
     expect(fetchLog.length).toBe(1); // only /api/info from load
   });
 
+  it("trim longer than 5 minutes → error without fetch", async () => {
+    await bootApp([jsonResponse({ ...INFO_OK, duration_ms: 600_000 })]);
+    await loadVideoViaUi();
+    input("start-slider", "0");
+    input("end-slider", "600000"); // 10 minutes → over the 5-min cap
+    click("cut-btn");
+    await flushAsync();
+    expect(byId("error-msg").textContent).toContain("5 minutes");
+    expect(fetchLog.length).toBe(1); // only /api/info from load, no /api/cut
+  });
+
   it("success → poll until done → download link + duration meta", async () => {
     useSyncTimers();
     await bootApp([
@@ -1056,8 +1068,8 @@ describe("startCut (cut & download)", () => {
     expect(byId("download-area").classList.contains("hidden")).toBe(false);
     expect(byId("download-link").getAttribute("href")).toBe("/api/download/job123");
     expect(byId("download-link").textContent).toContain("Download");
-    expect(byId("download-meta").textContent).toContain("00:00:04.500");
     expect(byId("download-meta").textContent).toContain("Result shifted");
+    expect(byId("time-result-badge").textContent).not.toBe("–"); // elapsed filled in
     expect(byId("cut-btn").disabled).toBe(false);
     expect(byId("cut-btn").textContent).toBe("▶ Cut & Download");
   });
@@ -1158,7 +1170,7 @@ describe("startCut (cut & download)", () => {
     await flushAsync();
 
     expect(byId("download-meta").textContent).not.toContain("shifted");
-    expect(byId("download-meta").textContent).toContain("00:00:04.000");
+    expect(byId("time-result-badge").textContent).not.toBe("–");
   });
 });
 
@@ -1351,6 +1363,51 @@ describe("output format stack (mp4/mov/webm)", () => {
   });
 });
 
+describe("cut estimate (heuristic from user inputs)", () => {
+  it("hidden before a video loads", async () => {
+    await bootApp();
+    expect(byId("cut-estimate").classList.contains("hidden")).toBe(true);
+  });
+
+  it("appears after load and updates when parameters change", async () => {
+    await bootApp([jsonResponse(INFO_OK)]);
+    await loadVideoViaUi();
+    expect(byId("cut-estimate").classList.contains("hidden")).toBe(false);
+    expect(byId("cut-estimate").textContent).toContain("≈");
+    const before = byId("cut-estimate").textContent;
+    input("start-slider", "10000");
+    input("end-slider", "20000");
+    expect(byId("cut-estimate").textContent).not.toBe(before);
+  });
+
+  it("estimateSeconds returns a positive number", async () => {
+    await bootApp([jsonResponse(INFO_OK)]);
+    await loadVideoViaUi();
+    const s = appApi.estimateSeconds();
+    expect(s).toBeGreaterThan(0);
+    expect(s).toBeLessThan(600);
+  });
+
+  it("webm adds conversion time vs mp4", async () => {
+    await bootApp([jsonResponse(INFO_OK)]);
+    await loadVideoViaUi();
+    input("end-slider", "10000"); // 10s clip
+    const mp4 = appApi.estimateSeconds();
+    byId("fmt-stack").querySelector('.res-btn[data-format="webm"]').click();
+    const webm = appApi.estimateSeconds();
+    expect(webm).toBeGreaterThan(mp4);
+  });
+
+  it("uses the server's measured estimate params", async () => {
+    await bootApp([jsonResponse({ ...INFO_OK, estimate_params: { x264_fps: 200, vp9_fps: 80, throughput_bps: 1_000_000 } })]);
+    await loadVideoViaUi();
+    input("end-slider", "10000"); // 10s clip
+    // A slow server (1 MB/s) makes the download leg noticeable → total > 3s.
+    const slow = appApi.estimateSeconds();
+    expect(slow).toBeGreaterThan(3);
+  });
+});
+
 describe("pipeline steps & result card (new design)", () => {
   it("stage from SSE → step status (active/done/skipped) + percent", async () => {
     useFakeEventSource();
@@ -1368,7 +1425,6 @@ describe("pipeline steps & result card (new design)", () => {
 
     es.dispatch({ status: "running", stage: "download", percent: 40, message: "Downloading…" });
     expect(byId("step-1").className).toContain("done");
-    expect(byId("step-1").querySelector(".step-status-text").textContent).toContain("Done");
     expect(byId("step-2").className).toContain("active");
     expect(byId("process-percent").textContent).toBe("40%");
 
@@ -1452,6 +1508,81 @@ describe("pipeline steps & result card (new design)", () => {
     expect(byId("download-area").classList.contains("hidden")).toBe(false);
   });
 
+  it("done job with backend stage timestamps fills per-step durations + elapsed", async () => {
+    useFakeEventSource();
+    await bootApp([jsonResponse(INFO_OK), jsonResponse({ job_id: "job123" })]);
+    await loadVideoViaUi();
+    click("cut-btn");
+    await flushAsync();
+    const created = Date.now() / 1000 - 90; // 90s ago
+    lastES().dispatch({
+      status: "done",
+      download_url: "/api/download/job123",
+      file: "x.mp4",
+      actual_duration_ms: 4000,
+      snap_delta_ms: 0,
+      created_at: created,
+      stage_started_at: {
+        extract: created,
+        download: created + 5,
+        verify: created + 80,
+        done: created + 90,
+      },
+    });
+    expect(byId("step-1").querySelector(".step-elapsed").textContent).toBe("00:00:05.000");
+    expect(byId("step-2").querySelector(".step-elapsed").textContent).toBe("00:01:15.000");
+    expect(byId("step-5").querySelector(".step-elapsed").textContent).toBe("00:00:10.000");
+    expect(byId("time-result-badge").textContent).toBe("00:01:30.000");
+  });
+
+  it("running job with estimate_ms shows per-step estimates immediately", async () => {
+    useFakeEventSource();
+    await bootApp([jsonResponse(INFO_OK), jsonResponse({ job_id: "job123" })]);
+    await loadVideoViaUi();
+    byId("fmt-stack").querySelector('.res-btn[data-format="webm"]').click(); // convert visible
+    click("cut-btn");
+    await flushAsync();
+    lastES().dispatch({
+      status: "running",
+      stage: "extract",
+      percent: null,
+      message: "Fetching video info…",
+      estimate_ms: { extract: 2000, download: 5000, encode: 0, convert: 3000, verify: 1000 },
+    });
+    // Estimates appear from the very first snapshot — no waiting for progress.
+    expect(byId("step-2").querySelector(".step-est").textContent).toBe("~00:00:05.000");
+    expect(byId("step-4").querySelector(".step-est").textContent).toBe("~00:00:03.000");
+    expect(byId("step-1").className).toContain("active");
+  });
+
+  it("cut request includes stream hints for the backend estimate", async () => {
+    useSyncTimers();
+    await bootApp([
+      jsonResponse(INFO_OK),
+      jsonResponse({ job_id: "job123" }),
+      jsonResponse({ status: "done", download_url: "/api/download/job123", file: "x.mp4", actual_duration_ms: 4000, snap_delta_ms: 100 }),
+    ]);
+    await loadVideoViaUi();
+    click("cut-btn");
+    await flushAsync();
+    const cutReq = fetchLog.find((f) => f.url === "/api/cut");
+    const hints = JSON.parse(cutReq.opts.body).hints;
+    expect(hints.bitrate_kbps).toBeGreaterThan(0); // best → highest (720p 2000)
+    expect(hints.height).toBeGreaterThan(0);
+  });
+
+  it("timeLeft estimates remaining from the progress rate", () => {
+    // convert range [80,95]: half way (87.5) with 10s elapsed → ~10s left.
+    expect(appApi.timeLeft(10000, 87.5, [80, 95])).toBeCloseTo(10000, 0);
+    // One third (85) with 10s elapsed → ~20s left.
+    expect(appApi.timeLeft(10000, 85, [80, 95])).toBeCloseTo(20000, 0);
+    // Saturating near the max (still running) → no misleading "0.000 left".
+    expect(appApi.timeLeft(10000, 95, [80, 95])).toBeNull();
+    expect(appApi.timeLeft(10000, 94.9, [80, 95])).toBeNull();
+    expect(appApi.timeLeft(10000, 80, [80, 95])).toBeNull(); // no progress yet
+    expect(appApi.timeLeft(10000, 50, [])).toBeNull(); // indeterminate stage
+  });
+
   it("est. size follows the bitrate of the selected resolution (best = highest)", async () => {
     useFakeEventSource();
     await bootApp([jsonResponse(INFO_OK), jsonResponse({ job_id: "job123" })]);
@@ -1518,6 +1649,23 @@ describe("pipeline steps & result card (new design)", () => {
     expect(byId("dur-result-badge").textContent).toBe("–");
   });
 
+  it("uses the real file size when the server provides it", async () => {
+    useFakeEventSource();
+    await bootApp([jsonResponse(INFO_OK), jsonResponse({ job_id: "job123" })]);
+    await loadVideoViaUi();
+    click("cut-btn");
+    await flushAsync();
+    lastES().dispatch({
+      status: "done",
+      download_url: "/api/download/job123",
+      file: "x.mp4",
+      actual_duration_ms: 4000,
+      snap_delta_ms: 0,
+      file_size: 5_000_000, // real on-disk size
+    });
+    expect(byId("size-result-badge").textContent).toBe("5.0 MB");
+  });
+
   it("precise mode → encode stage present (not skipped)", async () => {
     useFakeEventSource();
     await bootApp([jsonResponse(INFO_OK), jsonResponse({ job_id: "job123" })]);
@@ -1533,7 +1681,6 @@ describe("pipeline steps & result card (new design)", () => {
     expect(byId("step-2").className).toContain("done");
     expect(byId("step-3").className).not.toContain("hidden"); // visible in precise mode
     expect(byId("step-3").className).toContain("active");
-    expect(byId("step-3").querySelector(".step-status-text").textContent).toBe("Processing…");
     expect(byId("process-percent").textContent).toBe("60%");
   });
 });

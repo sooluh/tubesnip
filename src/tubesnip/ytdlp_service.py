@@ -101,6 +101,140 @@ _info_cache: dict[str, tuple[float, dict]] = {}
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# Sane defaults used before the first real benchmark (and as fallback when
+# ffmpeg can't run). throughput_bps is refined by real job measurements
+# (update_calibration) — the estimate adapts to the server's actual internet
+# speed and CPU.
+_BENCH_DEFAULTS = {"x264_fps": 200.0, "vp9_fps": 80.0, "throughput_bps": 6_000_000}
+
+
+@functools.lru_cache(maxsize=1)
+def encode_benchmark() -> dict:
+    """Measure this server's real encode speed on a 1s 1080p30 synthetic clip
+    (x264 ultrafast + vp9 realtime), cached for the process lifetime. Used to
+    calibrate per-step time estimates and shared with the frontend via /api/info
+    so the pre-cut estimate matches the actual machine. Falls back to
+    _BENCH_DEFAULTS when ffmpeg fails."""
+    bench = dict(_BENCH_DEFAULTS)
+    for enc, key, opts in [
+        ("libx264", "x264_fps", ["-preset", "ultrafast", "-crf", "18"]),
+        ("libvpx-vp9", "vp9_fps", ["-deadline", "realtime", "-cpu-used", "5"]),
+    ]:
+        try:
+            start = time.monotonic()
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=1",
+                 "-c:v", enc, *opts, "-f", "null", "-"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            bench[key] = round(30 / max(0.001, time.monotonic() - start), 1)
+        except Exception:
+            pass  # keep the default
+    return bench
+
+
+# Adaptive calibration from completed jobs: real throughput (internet speed) and
+# encode fps measured from stage timestamps. Persisted so it survives restarts.
+_CAL_FILE = Path(os.environ.get("TUBESNIP_DATA_DIR", "data")) / "calibration.json"
+_calibration: dict = {}
+
+
+def _ema(current, new):
+    if current is None:
+        return new
+    return 0.6 * current + 0.4 * new
+
+
+def load_calibration() -> None:
+    """Load measured throughput/encode speeds from a previous run."""
+    global _calibration
+    try:
+        if _CAL_FILE.exists():
+            _calibration = json.loads(_CAL_FILE.read_text())
+    except Exception:
+        _calibration = {}
+
+
+def save_calibration() -> None:
+    try:
+        _CAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CAL_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_calibration))
+        os.replace(tmp, _CAL_FILE)
+    except OSError:
+        logger.exception("failed to persist calibration")
+
+
+def estimate_params() -> dict:
+    """Estimate parameters for a cut: baseline from the synthetic benchmark,
+    refined by what completed jobs actually took (EMA). Exposed via /api/info
+    so the frontend's pre-cut estimate matches reality."""
+    bench = encode_benchmark()
+    cal = _calibration
+    return {
+        "x264_fps": cal.get("x264_fps") or bench["x264_fps"],
+        "vp9_fps": cal.get("vp9_fps") or bench["vp9_fps"],
+        "throughput_bps": cal.get("throughput_bps") or bench["throughput_bps"],
+        "extract_ms": cal.get("extract_ms") or 2000,
+        "verify_ms": cal.get("verify_ms") or 1000,
+    }
+
+
+def update_calibration(job: dict) -> None:
+    """Measure a completed job's real stage durations and feed them back into
+    the estimate parameters: internet throughput (bytes ÷ download time) and
+    encode fps (frames ÷ encode/convert time). This is what shrinks the gap
+    between the estimate and reality over time."""
+    ssa = job.get("stage_started_at") or {}
+    hints = job.get("hints") or {}
+    dur_s = max(0, (job.get("end_ms", 0) - job.get("start_ms", 0))) / 1000
+    bitrate = float(hints.get("bitrate_kbps") or 0)
+    fps = float(hints.get("fps") or 30)
+    codec = (hints.get("codec") or "h264").lower().replace(".", "")  # "H.264" -> "h264"
+    fmt = job.get("format") or "mp4"
+    order = ["extract", "download", "encode", "convert", "verify", "done"]
+
+    def next_start(stage: str) -> float | None:
+        i = order.index(stage)
+        for s in order[i + 1:]:
+            if ssa.get(s) is not None:
+                return ssa[s]
+        return None
+
+    if not ssa:
+        return
+
+    # extract / verify overhead (ms)
+    for stage, key in (("extract", "extract_ms"), ("verify", "verify_ms")):
+        end = next_start(stage)
+        if ssa.get(stage) is not None and end is not None:
+            _calibration[key] = round(_ema(_calibration.get(key), (end - ssa[stage]) * 1000))
+
+    # internet throughput from the download leg: estimated bytes ÷ real time.
+    dl_end = next_start("download")
+    if ssa.get("download") is not None and dl_end is not None and dur_s > 0 and bitrate > 0:
+        real_s = max(0.5, dl_end - ssa["download"])
+        bytes_ = dur_s * bitrate * 1000 / 8
+        _calibration["throughput_bps"] = round(_ema(_calibration.get("throughput_bps"), bytes_ / real_s))
+
+    # encode fps from the re-encode / convert legs.
+    for stage, measure_key in (("encode", "x264_fps"), ("convert", None)):
+        end = next_start(stage)
+        if ssa.get(stage) is None or end is None or dur_s <= 0:
+            continue
+        if stage == "convert":
+            if fmt == "mov" and codec in ("h264", "hevc"):
+                continue  # remux — no encoding
+            measure_key = "vp9_fps" if fmt == "webm" else "x264_fps"
+        real_s = max(0.5, end - ssa[stage])
+        frames = dur_s * fps
+        _calibration[measure_key] = round(_ema(_calibration.get(measure_key), frames / real_s), 1)
+
+    save_calibration()
+
 
 class YtError(Exception):
     """Error from yt-dlp/ffmpeg with a user-friendly message."""
@@ -222,7 +356,10 @@ def get_video_info(url: str) -> dict:
         raise YtError("Invalid YouTube URL.")
     cached = _info_cache.get(vid)
     if cached and time.time() - cached[0] < _INFO_CACHE_TTL_S:
-        return cached[1]
+        # estimate_params is NOT cached: it reflects the latest adaptive
+        # calibration (measured throughput/encode speeds), which changes as
+        # jobs complete — always serve the current values.
+        return {**cached[1], "estimate_params": estimate_params()}
     watch_url = f"https://www.youtube.com/watch?v={vid}"
 
     proc = _run(
@@ -251,6 +388,7 @@ def get_video_info(url: str) -> dict:
         "resolutions": _collect_resolutions(formats),
     }
     _info_cache[vid] = (time.time(), result)
+    result["estimate_params"] = estimate_params()
     return result
 
 

@@ -25,12 +25,14 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _reset_jobs_state():
+def _reset_jobs_state(monkeypatch):
     """Isolate global state between tests.
 
     `_queue` is swapped for an empty queue so the real worker (a daemon thread
     started at import time) stays stuck on the old queue and never processes
-    jobs; tests that need worker behavior start their own thread.
+    jobs; tests that need worker behavior start their own thread. The encode
+    benchmark is also faked (a real ffmpeg benchmark would run per test and
+    need ffmpeg installed).
     """
     jobs._jobs = {}
     jobs._queue = queue.Queue()
@@ -40,6 +42,12 @@ def _reset_jobs_state():
     jobs.REDIS_URL = ""
     jobs.SHARED_DIR = None
     ytdlp_service._info_cache.clear()
+    ytdlp_service._calibration = {}
+    ytdlp_service.encode_benchmark.cache_clear()
+    monkeypatch.setattr(
+        ytdlp_service, "encode_benchmark",
+        lambda: {"x264_fps": 200.0, "vp9_fps": 80.0, "throughput_bps": 6_000_000},
+    )
     yield
     # Drain leftover jobs so they don't leak into the next test.
     while True:

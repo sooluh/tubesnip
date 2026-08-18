@@ -54,8 +54,13 @@ class CutRequest(BaseModel):
 def api_health():
     """Liveness/readiness for container orchestration. `redis` is false in
     single-node mode or when the configured Redis is unreachable (the app then
-    runs in-memory — healthy, just not multi-node)."""
-    return {"ok": True, "redis": jobs._r() is not None}
+    runs in-memory — healthy, just not multi-node). `estimate_params` lets the
+    frontend re-calibrate its pre-cut estimate after a job completes."""
+    return {
+        "ok": True,
+        "redis": jobs._r() is not None,
+        "estimate_params": ytdlp_service.estimate_params(),
+    }
 
 
 @app.post("/api/info")
@@ -76,6 +81,8 @@ def api_cut(req: CutRequest):
         raise HTTPException(400, "format must be 'mp4', 'mov', or 'webm'.")
     if req.start_ms < 0 or req.end_ms <= req.start_ms:
         raise HTTPException(400, "start_ms must be >= 0 and end_ms > start_ms.")
+    if req.end_ms - req.start_ms > 5 * 60 * 1000:
+        raise HTTPException(400, "Trim length must be at most 5 minutes (300000 ms).")
     if not ytdlp_service.extract_video_id(req.url):
         raise HTTPException(400, "Invalid YouTube URL.")
     if req.resolution != "best":
